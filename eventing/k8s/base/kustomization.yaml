@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No `namespace:` here — the overlays set it, so the same base deploys to kev1,
+# kev2 or anywhere else. `topics/` is deliberately NOT a resource of this base:
+# it targets ns kafka and cannot participate in an overlay's namespace rewrite.
+resources:
+  - configmap.yaml
+  - eventbridge-deployment.yaml
+  - eventbridge-service.yaml
+  - eventbridge-route.yaml
+  - eventrunner-deployment.yaml
+  - eventrunner-scaledobject.yaml
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: rossoctl-eventing

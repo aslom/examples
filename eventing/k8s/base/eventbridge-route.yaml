@@ -1,0 +1,22 @@
+# OpenShift Route. Goal 1 (§2) is a reachable public URL — everything a human
+# sees hangs off it, so it is created early and its reachability is PROVEN
+# (§12 check 9) before EventRunner is started.
+#
+# On vanilla Kubernetes replace this with the Ingress in
+# overlays/ingress-example.yaml; k8s_preflight.py check 8 detects which of the
+# two the cluster can serve before anything is applied.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: eventbridge
+  labels:
+    app.kubernetes.io/name: eventbridge
+spec:
+  to:
+    kind: Service
+    name: eventbridge
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

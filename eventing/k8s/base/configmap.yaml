@@ -1,0 +1,39 @@
+# The §8.9 configuration surface, minus anything secret.
+#
+# NOT here on purpose: EVENT_BRIDGE_PUBLIC_BASE_URL. It must be the Route
+# hostname, which does not exist until the Route is created, and which the pod
+# cannot discover for itself (§8.7 — the application has no Kubernetes client, by
+# §1.1). k8s_deploy.py sets it with `kubectl set env` after the Route exists.
+#
+# Leaving it undeclared here is also what keeps §14.1 change detection usable: a
+# value this manifest never mentions is merged rather than reverted by
+# `kubectl apply`, so `kubectl diff` does not report drift forever.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventing-config
+data:
+  # Cross-namespace DNS to the shared Strimzi cluster in ns kafka.
+  KAFKA_BOOTSTRAP: my-cluster-kafka-bootstrap.kafka.svc:9092
+  REQUEST_TOPIC: kev1-requests
+  RESPONSE_TOPIC: kev1-responses
+  # MUST equal the ScaledObject trigger's consumerGroup exactly. A mismatch is a
+  # silent no-scale failure: KEDA measures a group nobody joins.
+  ER_CONSUMER_GROUP: kev1-eventrunner
+  EB_HTTP_ADDR: 0.0.0.0:8080
+  NTFY_ENABLED: "false"
+  # §16 Gap B: where EventRunner checkpoints claude transcripts, so /continue
+  # survives the pod that ran turn 1 being scaled away.
+  ER_EVENTBRIDGE_URL: http://eventbridge:8080
+  # RQ-1: commit after the terminal event so lag means "work not finished" and
+  # KEDA cannot scale a streaming pod away mid-run.
+  ER_COMMIT_AFTER_TERMINAL: "true"
+  # §16 Gap C: drop replayed requests older than an hour instead of re-running a
+  # day of agent work at real API cost.
+  ER_MAX_REQUEST_AGE_S: "3600"
+  # §8.3: below terminationGracePeriodSeconds (600) so the kubelet does not
+  # SIGKILL mid-drain.
+  ER_DRAIN_TIMEOUT_S: "570"
+  ER_HEARTBEAT_MAX_AGE_S: "90"
+  # §11, feature-flagged off: the e2e path is unaffected.
+  ER_REQUIRE_SIGNATURE: "false"

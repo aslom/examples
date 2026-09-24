@@ -1,0 +1,68 @@
+# Topics as Strimzi CRs. DESIGN_PHASE1.md §6.
+#
+# TWO details here are mandatory and both fail confusingly if wrong:
+#
+#  1. apiVersion MUST be kafka.strimzi.io/v1. Strimzi 1.0.x no longer serves
+#     v1beta2, so an older manifest fails outright with
+#     `no matches for kind "KafkaTopic" in version "kafka.strimzi.io/v1beta2"`.
+#
+#  2. namespace MUST be `kafka` — the operator's own namespace. Its
+#     STRIMZI_NAMESPACE is a downward-API fieldRef to metadata.namespace, so it
+#     watches ONLY `kafka`. A KafkaTopic created in `kev1` is accepted by the API
+#     server and then SILENTLY ignored: no reconcile, no event, no error
+#     (Finding 1). That is why this file lives outside base/ — it targets a
+#     different namespace and cannot participate in the overlay's `namespace:`
+#     rewrite. Applying it is its own step and needs write access to ns kafka.
+#
+# Names are namespace-prefixed (§5) because the broker in ns kafka is shared and
+# already carries an unrelated `keda-test-topic`.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: kev1-requests
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+    # §12 check 10 / RQ-5: how preflight tells "our topic" from "someone else
+    # took this name". Consuming a foreign topic would look like a working deploy
+    # that mysteriously processes other people's events.
+    app.kubernetes.io/part-of: rossoctl-eventing
+spec:
+  # Partitions are the scaling ceiling: Kafka assigns each partition to exactly one
+  # consumer in a group, so N partitions means at most N useful EventRunner pods and
+  # maxReplicaCount must stay <= this number.
+  #
+  # Raised 6 -> 12 so a 100-agent batch can spread over at least 10 pods. Partitions
+  # can be INCREASED in place but never decreased (the Strimzi CRD says so explicitly),
+  # so this is a one-way door — pick generously.
+  #
+  # One caveat worth knowing before changing it again: the key -> partition mapping is
+  # a hash over the partition COUNT, so raising it re-maps future messages. A single
+  # conversation whose turns straddle the change can have them land on different
+  # partitions, and therefore different pods, which is the one case where the
+  # per-correlation ordering guarantee (§4) does not hold. Harmless for a new batch;
+  # do it while idle.
+  partitions: 12
+  # 1 because the cluster has a single broker; anything higher leaves the topic
+  # Ready=False forever.
+  replicas: 1
+  config:
+    # 24h, deliberately BELOW the broker's offsets.retention.minutes (7 days).
+    # §16 Gap C: a group idle longer than offset retention loses its committed
+    # offsets and replays everything still in the topic. Bounding retention to a
+    # day bounds that blast radius to a day rather than a week.
+    retention.ms: "86400000"
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: kev1-responses
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+    app.kubernetes.io/part-of: rossoctl-eventing
+spec:
+  partitions: 12
+  replicas: 1
+  config:
+    retention.ms: "86400000"

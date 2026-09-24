@@ -1,0 +1,43 @@
+# The demo runs a real agent, which needs three things the e2e test does not
+# (§15): an image containing the `claude` CLI, a credential, and an explicit mode.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventrunner
+spec:
+  template:
+    spec:
+      containers:
+        - name: eventrunner
+          # The base runner image deliberately ships no `claude` CLI — it is
+          # distributed per-platform and versioned independently. Without this
+          # derived image every real run fails with `claude binary not found`,
+          # and mock mode is exactly what stops the e2e test from catching it.
+          # A tag on the runner repo, not a repo of its own: Quay makes new
+          # repositories private by default and preflight hard-fails an image
+          # that is not anonymously pullable.
+          image: quay.io/aslomnet/rossoctl-eventrunner:claude-dev
+          env:
+            # Declared, not inferred. Phase 0's auto-detection would pick real
+            # mode on its own once the Secret mounts, but then the mode is a side
+            # effect of whether a Secret happened to exist. Say it out loud.
+            - name: ER_MOCK_CLAUDE
+              value: "false"
+            # §16 Gap B: claude keeps session transcripts under $HOME/.claude.
+            # $HOME must be on the mounted volume, not the container's ephemeral
+            # layer, or a restart loses every resumable session on this pod. The
+            # transcript checkpoint in EventBridge is what covers a pod being
+            # destroyed entirely; this covers a restart in place.
+            - name: HOME
+              value: /data/home
+            - name: CLAUDE_CONFIG_DIR
+              value: /data/home/.claude
+          envFrom:
+            - configMapRef:
+                name: eventing-config
+            # Created at deploy time from your environment — see the comment in
+            # kustomization.yaml. Not optional: a demo without a credential would
+            # start, accept requests and fail every one of them on auth.
+            - secretRef:
+                name: anthropic-credentials
+                optional: false

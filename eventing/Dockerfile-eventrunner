@@ -1,0 +1,109 @@
+# EventRunner — consumes the requests topic, runs the agent, emits response events.
+#
+# Build context is this directory (eventing/):
+#   docker build -f Dockerfile-eventrunner -t rossoctl/eventrunner:dev .
+#
+# Mock mode is the default here. EventRunner only spawns real `claude` when an
+# Anthropic credential is present in the environment (ANTHROPIC_AUTH_TOKEN or
+# ANTHROPIC_API_KEY) — see eventrunner/config.py. That keeps a bare
+# `docker run` useful and free instead of failing on auth for every request.
+#
+# To run real Claude you need BOTH a credential and the `claude` CLI on PATH in
+# the image; this image deliberately does not vendor the CLI (it is distributed
+# per-platform and versioned independently). Either install it in a derived
+# image, or bind-mount it and set CLAUDE_BIN.
+
+ARG UV_VERSION=0.12.15
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uvbin
+
+FROM debian:trixie-slim
+
+LABEL org.opencontainers.image.title="rossoctl-eventrunner" \
+      org.opencontainers.image.description="Kafka-driven agent executor emitting CloudEvents" \
+      org.opencontainers.image.source="https://github.com/aslom/rossoctl"
+
+COPY --from=uvbin /uv /uvx /usr/local/bin/
+
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Free-threaded interpreter: the router runs one thread per in-flight
+# correlationid, plus two stream pumps per agent turn.
+ARG PYTHON_VERSION=3.14t
+RUN uv python install "${PYTHON_VERSION}" \
+ && uv venv --python "${PYTHON_VERSION}" "${VIRTUAL_ENV}" \
+ && "${VIRTUAL_ENV}/bin/python" -c 'import sys; assert not sys._is_gil_enabled(), "expected a free-threaded build"'
+
+# ca-certificates is REQUIRED, not hygiene. debian:*-slim ships no CA store, and a
+# uv-managed CPython then reports `ssl.get_default_verify_paths().cafile = None`, so
+# EVERY outbound HTTPS request fails with:
+#
+#   CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+#
+# That silently killed ntfy fan-out in-cluster (and the selftest's public-tunnel
+# probes). It is invisible on a laptop, which has a CA store of its own.
+#
+# Installing the package is only half the fix: this interpreter is a uv-managed
+# standalone CPython compiled to look for `/etc/ssl/cert.pem`, while Debian's
+# ca-certificates writes `/etc/ssl/certs/ca-certificates.crt`. Without the symlink
+# `cafile` is still None. A symlink rather than SSL_CERT_FILE on purpose — the
+# `claude` subprocess gets a curated env allowlist (eventrunner/runner.py), so an
+# env var would not reach it, whereas the OpenSSL default path always applies.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem \
+ && python -c "import ssl; p=ssl.get_default_verify_paths(); assert p.cafile, 'no CA bundle'; print('CA bundle:', p.cafile)"
+
+WORKDIR /app
+
+# See Dockerfile-eventbridge: deps only, the project itself does not build.
+COPY pyproject.toml ./
+RUN uv pip install --python "${VIRTUAL_ENV}/bin/python" -r pyproject.toml
+
+COPY shared/ ./shared/
+COPY eventrunner/ ./eventrunner/
+
+# Per-correlation working dirs (prompt.txt, stdout.jsonl, stderr.log) and the
+# pidfile live under $TMPDIR/rossoctl-keda1/eventrunner.
+ENV TMPDIR=/data \
+    HOME=/home/app
+
+# Portability across all three deployment targets:
+#   laptop / plain Docker  runs as the declared uid 10001
+#   OpenShift              the SCC replaces that uid with an arbitrary one from
+#                          the namespace range, but the process ALWAYS gets gid 0
+#   vanilla Kubernetes     restricted Pod Security wants runAsNonRoot: true
+#
+# So every writable path is group-0 owned and group-writable (`chmod g=u` copies
+# the owner bits onto the group), and the user's primary group IS 0 so the
+# laptop case exercises the same permission path. `chown app:app` was the bug:
+# an arbitrary UID is not `app` and shares nothing with it.
+#
+# HOME is set explicitly rather than left to a passwd lookup, because an
+# arbitrary UID has no /etc/passwd entry on a plain Kubernetes node. `claude`
+# keeps its session transcripts under $HOME/.claude, so this path must be
+# writable for `--resume` to work at all.
+RUN useradd --uid 10001 --gid 0 --create-home --home-dir /home/app app \
+ && mkdir -p /data \
+ && chgrp -R 0 /data /app /home/app \
+ && chmod -R g=u /data /app /home/app
+
+VOLUME ["/data"]
+
+# Numeric on purpose. With `runAsNonRoot: true` and a *named* user the kubelet
+# cannot prove the user is non-root, and fails the container with
+# CreateContainerConfigError: "image has non-numeric user (app)".
+USER 10001
+
+ENV KAFKA_BOOTSTRAP=kafka:9092 \
+    ER_MAX_CONCURRENT=4
+
+STOPSIGNAL SIGTERM
+
+CMD ["python", "-m", "eventrunner"]

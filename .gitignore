@@ -224,3 +224,10 @@ secrets.*
 
 # Bogus lock files created by running uv in home directory.
 uv.lock
+
+# Phase 1: never commit a credential used by the eventing demo. The demo overlay
+# references Secret/anthropic-credentials and k8s_deploy.py creates it from the
+# environment at deploy time; these patterns catch a local file made by hand.
+eventing/**/*seed*.hex
+eventing/**/anthropic-credentials*.yaml
+eventing/**/*.secret.yaml
