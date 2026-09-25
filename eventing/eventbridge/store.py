@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS prompts (
   mode          TEXT NOT NULL,         -- 'start' | 'continue'
   prompt        TEXT NOT NULL,
   submitted_utc TEXT NOT NULL,
+  submitter     TEXT,                  -- authenticated caller; NULL when auth is off
   PRIMARY KEY (correlationid, turn_index)
 );
 CREATE INDEX IF NOT EXISTS prompts_by_corr ON prompts(correlationid);
@@ -101,6 +102,13 @@ class Store:
             c.execute("PRAGMA synchronous=NORMAL")
         self._r.executescript(_SCHEMA_RESPONSES)
         self._s.executescript(_SCHEMA_SESSIONS)
+        # `CREATE TABLE IF NOT EXISTS` is a no-op on an existing file, so a column
+        # added after a DB was created needs an explicit ALTER. Idempotent: SQLite
+        # raises OperationalError when the column is already there.
+        try:
+            self._s.execute("ALTER TABLE prompts ADD COLUMN submitter TEXT")
+        except sqlite3.OperationalError:
+            pass
         self._lock = threading.Lock()
         self._sub_lock = threading.Lock()
         self._subscribers: dict[str, list[threading.Event]] = {}
@@ -162,7 +170,8 @@ class Store:
                 )
 
     def insert_prompt(self, correlationid: str, mode: str, prompt: str,
-                       submitted_utc: str | None = None) -> int:
+                       submitted_utc: str | None = None,
+                       submitter: str | None = None) -> int:
         """Append a new prompt to this corr's turn tape. Returns the 1-based turn_index."""
         ts = submitted_utc or _now_iso()
         with self._lock:
@@ -172,8 +181,8 @@ class Store:
             ).fetchone()
             next_idx = (row[0] if row else 0) + 1
             self._s.execute(
-                "INSERT INTO prompts(correlationid,turn_index,mode,prompt,submitted_utc) VALUES (?,?,?,?,?)",
-                (correlationid, next_idx, mode, prompt, ts),
+                "INSERT INTO prompts(correlationid,turn_index,mode,prompt,submitted_utc,submitter) VALUES (?,?,?,?,?,?)",
+                (correlationid, next_idx, mode, prompt, ts, submitter),
             )
         return next_idx
 
@@ -206,10 +215,11 @@ class Store:
 
     def get_prompts(self, correlationid: str) -> list[dict[str, Any]]:
         rows = self._s.execute(
-            "SELECT turn_index, mode, prompt, submitted_utc FROM prompts WHERE correlationid=? ORDER BY turn_index",
+            "SELECT turn_index, mode, prompt, submitted_utc, submitter FROM prompts WHERE correlationid=? ORDER BY turn_index",
             (correlationid,),
         ).fetchall()
-        return [{"turn_index": t, "mode": m, "prompt": p, "submitted_utc": s} for t, m, p, s in rows]
+        return [{"turn_index": t, "mode": m, "prompt": p, "submitted_utc": s, "submitter": w}
+                for t, m, p, s, w in rows]
 
     def get_session(self, correlationid: str) -> dict[str, Any] | None:
         row = self._s.execute(
