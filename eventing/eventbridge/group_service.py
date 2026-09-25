@@ -55,7 +55,8 @@ class GroupService:
             _log(f"could not publish group.started for {groupid}: {e!r}")
 
     def submit_members(self, groupid: str, prompts: list[str], *,
-                       max_turns: int = 3, model: str | None = None) -> list[str]:
+                       max_turns: int = 3, model: str | None = None,
+                       submitter: str | None = None) -> list[str]:
         """Publish every member's request, recording membership first.
 
         Membership is recorded BEFORE the request is published so a fast agent's
@@ -68,11 +69,12 @@ class GroupService:
             sess = ce.session_uuid(corr)
             workdir = f"{self.cfg.tmpdir}/eventrunner/work/{corr}"
             self.store.upsert_session(corr, sess, workdir, prompt)
-            self.store.insert_prompt(corr, "start", prompt)
+            self.store.insert_prompt(corr, "start", prompt, submitter=submitter)
             self.store.add_group_member(groupid, corr)
             self.producer.publish_request(
                 prompt=prompt, correlationid=corr, sessionuuid=sess, mode="start",
-                model=model, max_turns=max_turns, subject="start", groupid=groupid)
+                model=model, max_turns=max_turns, subject="start", groupid=groupid,
+                submitter=submitter)
             corrs.append(corr)
         return corrs
 
