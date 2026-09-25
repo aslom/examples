@@ -121,6 +121,19 @@ Stop everything with `scripts/stop-demo.sh`.
 Every response event carries `data.text` at the top level, so extracting a
 reply never means walking into `data.raw.message.content[0].text`.
 
+`POST /v0/groups` takes **`prompts`** — a flat list of strings, not member objects:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v0/groups -H 'Content-Type: application/json' \
+  -d '{"label":"hello-3","prompts":["Say Hello 1","Say Hello 2","Say Hello 3"]}'
+```
+
+Optional alongside it: `expected` (for an open group fed later — required when `prompts`
+is omitted, and rejected when it contradicts `len(prompts)`), `label`, `min_success`,
+`deadline_s`, `max_turns` (default 3), `model`, and an `Idempotency-Key` header so a
+retried POST returns the same group rather than launching a second batch. Passing
+`members[]` instead fails with `{"error": "give either prompts[] or expected"}`.
+
 A batch sends exactly **two** ntfy notifications — one when it starts, one when it
 finishes — no matter how many agents it contains; while a group is open its members'
 own notifications are suppressed. Group state is a cache: `/data` is `emptyDir` in the
@@ -345,9 +358,10 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/ -q
 ER_MOCK_CLAUDE=true PYTHONPATH=$PWD .venv/bin/python -m pytest tests/ -q
 ```
 
-Expect **286 passed, 2 skipped** (the skips want a local Kafka). Three failures in
-`test_cli_output.py` are pre-existing: they read a skill file that lives outside this
-repository.
+Expect **378 passed, 7 skipped** (the skips want a local Kafka) as of this branch —
+measured on macOS 15 / arm64 with CPython 3.14.0rc1 free-threaded. The three
+`test_cli_output.py` failures noted earlier no longer reproduce; they read a skill file
+that lives outside this repository, so they depend on where the checkout sits.
 
 **The one paid test.** The transcript-checkpoint design rests on `claude --resume`
 accepting a path. This proves it for about two cents, and includes the negative
@@ -356,6 +370,27 @@ control that makes the result meaningful:
 ```bash
 .venv/bin/python scripts/verify_resume_by_path.py
 ```
+
+**The broker.** The Quickstart assumes a Kafka 4.x (KRaft) already on `:9092`; there is
+no script for it. Without containers, from the Apache tarball and a JDK 17+:
+
+```bash
+tar xzf kafka_2.13-4.1.0.tgz && cd kafka_2.13-4.1.0
+sed -i '' "s#^log.dirs=.*#log.dirs=$PWD/data#" config/server.properties   # /tmp may be unwritable
+bin/kafka-storage.sh format -t "$(bin/kafka-storage.sh random-uuid)" \
+  -c config/server.properties --standalone
+bin/kafka-server-start.sh config/server.properties &
+
+for t in requests responses; do
+  bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 \
+    --create --topic $t --partitions 12 --replication-factor 1
+done
+```
+
+12 partitions matches the Phase 1 overlays, so local and cluster runs stay comparable.
+In `kafka-consumer-groups.sh --describe`, **lag means unfinished work, not lateness** —
+the offset commit is deferred to the terminal event, which is what makes lag a usable
+queue gauge during a batch.
 
 **The demo** is unchanged from Phase 0 — see [Quickstart](#quickstart).
 
@@ -834,6 +869,24 @@ export NTFY_TOKEN=<token>                 # only for a protected topic
 python3 scripts/k8s_deploy.py --yes
 ```
 
+**Running locally, `NTFY_TOPIC` alone is not enough — set `NTFY_ENABLED=true` too.**
+`eventbridge/config.toml` ships `enabled = false`, and the env override derives its own
+default from whatever the file loaded (`e("NTFY_ENABLED", "true" if cfg.ntfy.enabled
+else "false")`), so an unset `NTFY_ENABLED` leaves ntfy off no matter what the topic is.
+The startup banner is the check — it must say `ntfy=on`:
+
+```bash
+NTFY_ENABLED=true NTFY_TOPIC=$NTFY_TOPIC \
+  EVENT_BRIDGE_PUBLIC_BASE_URL=http://<lan-ip>:8080 \
+  .venv/bin/python -m eventbridge | grep 'ntfy='
+# [eventbridge] bootstrap=… http=… ntfy=on
+```
+
+With `ntfy=off` nothing is sent and nothing is logged, which looks exactly like a
+delivery failure. Also set `EVENT_BRIDGE_PUBLIC_BASE_URL` to a LAN address: the default
+`127.0.0.1` still delivers a fully readable notification, but the click-through and the
+`Continue…` action button resolve to loopback and do nothing from a phone.
+
 `k8s_deploy.py` stores it as `Secret/eventbridge-ntfy`, which the base Deployment
 references with `optional: true` — listed after the ConfigMap so its
 `NTFY_ENABLED=true` overrides the ConfigMap's `"false"`. Confirm with:
@@ -852,6 +905,11 @@ the latter. Without both, every outbound HTTPS call fails with
 `CERTIFICATE_VERIFY_FAILED` and ntfy silently delivers nothing.
 
 ### Watching the topics during a demo
+
+`scripts/watch_topics.py` is **cluster-only** — it locates a broker by the Strimzi
+selector `strimzi.io/name=my-cluster-kafka` and aborts against a local broker with
+`[watch] ABORT no Kafka broker pod matching …`. For a local run, point the Kafka CLI at
+`127.0.0.1:9092` directly (see [Local](#1-local-no-containers)).
 
 Your `kafka-get-offsets.sh` pipeline is right — `--topic` does accept a regex in Kafka
 4.x. But **`watch` is not in the Strimzi broker image** (nor is `clear`), so running it
