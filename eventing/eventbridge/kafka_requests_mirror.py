@@ -35,10 +35,10 @@ class RequestsMirror(threading.Thread):
         # is idempotent and cheap. A fixed group id would commit offsets
         # once and then never re-see the old events on the next start.
         self._group = group_id or f"eventbridge-requests-mirror-{os.getpid()}"
-        self._stop = threading.Event()
+        self._stopping = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
 
     def run(self) -> None:
         c = KafkaConsumer(
@@ -50,9 +50,9 @@ class RequestsMirror(threading.Thread):
             consumer_timeout_ms=500,
         )
         try:
-            while not self._stop.is_set():
+            while not self._stopping.is_set():
                 for rec in c:
-                    if self._stop.is_set():
+                    if self._stopping.is_set():
                         break
                     try:
                         evt = ce.from_kafka_binary(rec.headers or [], rec.value)

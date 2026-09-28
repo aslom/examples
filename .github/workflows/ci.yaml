@@ -38,6 +38,25 @@ jobs:
       - name: Run tests
         run: python -m pytest -v
 
+  # `eventing/` needs its own job rather than an entry in the root `testpaths`.
+  # Two reasons: it declares `requires-python = ">=3.14"` while the `test` job above
+  # pins 3.12, and it needs `kafka-python`, which the root job does not install.
+  # Without this job none of its tests run at all — the root `testpaths` does not
+  # include `eventing/tests`, so a green `test` check said nothing about this code.
+  eventing-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install test dependencies
+        run: pip install pytest kafka-python
+      - name: Run eventing tests
+        run: python -m pytest -v
+        working-directory: eventing
+
   # Make sure all of the examples start up successfully by running their `test_startup.exp` scripts, which use `expect` to verify the agent starts and responds to a simple input.
   test-startup:
     runs-on: ubuntu-latest

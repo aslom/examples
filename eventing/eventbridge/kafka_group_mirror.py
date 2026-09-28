@@ -56,14 +56,14 @@ class GroupMirror(threading.Thread):
         # committing consumer cannot do. See run() for why there is no group id.
         self._metadata_tries = metadata_tries
         self._max_empty_polls = max_empty_polls
-        self._stop = threading.Event()
+        self._stopping = threading.Event()
         self.total_to_read = 0
         self.rebuilt_groups = 0
         self.rebuilt_members = 0
         self.settled = 0
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
 
     def _partitions(self, c):
         """Topic metadata is fetched lazily, so the first call can legitimately return
@@ -72,7 +72,7 @@ class GroupMirror(threading.Thread):
             parts = c.partitions_for_topic(self._topic)
             if parts:
                 return [TopicPartition(self._topic, p) for p in sorted(parts)]
-            if self._stop.wait(0.5):
+            if self._stopping.wait(0.5):
                 return []
         return []
 
@@ -110,7 +110,7 @@ class GroupMirror(threading.Thread):
             _log(f"replaying {self.total_to_read} record(s) across "
                  f"{len(pending)}/{len(tps)} non-empty partition(s)")
             empty = 0
-            while pending and not self._stop.is_set():
+            while pending and not self._stopping.is_set():
                 batch = c.poll(timeout_ms=1000)
                 if not batch:
                     # A gap is possible (aborted transactions, deleted segments), so

@@ -29,10 +29,10 @@ class Consumer(threading.Thread):
         self._on_group_event = on_group_event
         self._on_member_event = on_member_event
         self._group = group_id
-        self._stop = threading.Event()
+        self._stopping = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
 
     def run(self) -> None:
         c = KafkaConsumer(
@@ -44,9 +44,9 @@ class Consumer(threading.Thread):
             consumer_timeout_ms=500,
         )
         try:
-            while not self._stop.is_set():
+            while not self._stopping.is_set():
                 for rec in c:
-                    if self._stop.is_set():
+                    if self._stopping.is_set():
                         break
                     evt = ce.from_kafka_binary(rec.headers or [], rec.value)
                     d = ce.envelope_dict(evt)

@@ -39,11 +39,16 @@ testpaths = ["tests"]
 # which targets py311 — while this package requires >=3.14 and uses the free-
 # threaded build. The root config is right for the agents and tools beside it;
 # it is simply not describing this package.
+#
+# Ruff resolves config per file from the nearest pyproject.toml with a [tool.ruff]
+# section, so this governs `eventing/` even though CI invokes `ruff check .` and
+# `ruff format .` from the repository root.
 [tool.ruff]
 line-length = 120
 # py313 rather than py314: the pinned ruff 0.11.4 does not recognise py314 yet
-# ("unknown variant"). This is still closer than the root's py311, and can be
-# raised once the pin moves.
+# ("unknown variant" — it fails to parse this file outright). This is still closer
+# than the root's py311, and can be raised once the pin moves. `requires-python`
+# above remains the real floor for running the code.
 target-version = "py313"
 
 [tool.ruff.lint]
@@ -57,3 +62,11 @@ select = ["E", "F", "I", "W"]
 # shutdown and error paths whose brevity is the point, so the style is declared
 # rather than rewritten.
 ignore = ["E501", "E402", "W291", "E701", "E702"]
+
+# `ruff format` is the other half of the CI `lint` job, and declaring the rules
+# above is not enough on its own: the formatter would undo them anyway, expanding
+# every compact guard and collapsing the aligned `EXT_* = ...` constant columns in
+# shared/ce.py — 78 files rewritten to no benefit. Lint still runs over this
+# package; only the formatter is scoped out.
+[tool.ruff.format]
+exclude = ["*"]

@@ -151,7 +151,7 @@ class NtfyPublisher(threading.Thread):
         self._base = public_base_url.rstrip("/")
         self._store = store
         self._q: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        self._stop = threading.Event()
+        self._stopping = threading.Event()
 
     def submit(self, event: dict[str, Any]) -> None:
         if not self._cfg.enabled or not self._cfg.topic:
@@ -244,11 +244,11 @@ class NtfyPublisher(threading.Thread):
         self._post(payload)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
         self._q.put(None)
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stopping.is_set():
             item = self._q.get()
             if item is None:
                 return

@@ -7,9 +7,14 @@ Two design constraints shape this:
 
 * **Canonicalization must be byte-identical between signer and verifier.** That
   is the part that bites. Rather than depend on JCS (a new dependency, which §1.1
-  forbids), the canonical form is sorted `key=value` lines over a fixed signed
-  attribute set plus `sha256(data-bytes)`. It is unambiguous, trivially
-  reimplementable in another language, and diffable when it disagrees.
+  forbids), the canonical form is sorted **length-prefixed** `key=value` fields
+  over a fixed signed attribute set, plus `sha256(data-bytes)`. The length
+  prefixes are load-bearing, not decoration: with plain `key=value` lines a value
+  containing a newline can synthesize an extra attribute line, so two
+  structurally different events encode to identical bytes and one signature
+  validates both (see `canonical`). Netstring-style prefixes make the encoding
+  unambiguous, and it stays trivially reimplementable in another language and
+  diffable when it disagrees.
 * **Pure Python.** `cryptography` is a C extension and is banned. Ed25519 is
   implemented here from RFC 8032 using only `hashlib` — about 70 lines, and
   verified against the RFC's own test vectors in `tests/test_signing.py`.
@@ -66,12 +71,29 @@ def _edwards_add(p: tuple[int, int], q: tuple[int, int]) -> tuple[int, int]:
 
 
 def _scalar_mult(p: tuple[int, int], e: int) -> tuple[int, int]:
-    if e == 0:
-        return (0, 1)
-    q = _scalar_mult(p, e // 2)
-    q = _edwards_add(q, q)
-    if e & 1:
-        q = _edwards_add(q, p)
+    """Double-and-add. **Not side-channel resistant — do not promote this to a
+    trust boundary that assumes it is.**
+
+    `if e & 1` branches on secret bits when `e` is the secret scalar from
+    `_secret_scalar`, and `_edwards_add` does a modular inversion per addition, so
+    wall-clock time varies with the scalar's Hamming weight. That is acceptable
+    *here* only because of where this runs: signing is feature-flagged off
+    (`ER_REQUIRE_SIGNATURE=false`), the seed never leaves the pod, and nothing
+    exposes a remote timing oracle over `sign()`. Verification uses only public
+    inputs, so it is not the sensitive direction.
+
+    If the pure-Python constraint (§1.1) is ever relaxed, `cryptography`'s Ed25519
+    is the better trade than hardening this by hand.
+
+    Iterative rather than recursive: the recursive form used one stack frame per
+    exponent bit, ~253 deep for a clamped Ed25519 scalar — under CPython's default
+    limit, but needless stack for a loop that unrolls cleanly.
+    """
+    q = (0, 1)
+    for bit in reversed(range(max(e.bit_length(), 1))):
+        q = _edwards_add(q, q)
+        if (e >> bit) & 1:
+            q = _edwards_add(q, p)
     return q
 
 
@@ -163,18 +185,44 @@ def data_bytes(data: Any) -> bytes:
     return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def canonical(attrs: dict[str, Any], data: Any) -> bytes:
-    """Sorted `key=value` lines over SIGNED_ATTRS, plus a digest of the payload.
+def _field(key: str, value: Any) -> str:
+    """One netstring-style field: `len(key):key=len(value):value`.
 
-    Absent attributes are omitted rather than written empty, and the line set is
-    sorted, so the encoding is independent of dict order. `datadigest` binds the
-    payload without embedding it, which keeps the signed blob small — the point of
-    pairing signing with `ER_INCLUDE_RAW=false` (§8.9).
+    The length prefixes are what make the whole encoding injective. See
+    `canonical` for the collision they prevent.
     """
-    lines = [f"{k}={attrs[k]}" for k in SIGNED_ATTRS
-             if attrs.get(k) not in (None, "")]
-    lines.append("datadigest=sha256:" + hashlib.sha256(data_bytes(data)).hexdigest())
-    return "\n".join(sorted(lines)).encode("utf-8")
+    k, v = str(key), str(value)
+    return f"{len(k)}:{k}={len(v)}:{v}"
+
+
+def canonical(attrs: dict[str, Any], data: Any) -> bytes:
+    """Sorted length-prefixed fields over SIGNED_ATTRS, plus a digest of the payload.
+
+    Absent attributes are omitted rather than written empty, and the field set is
+    sorted by attribute name, so the encoding is independent of dict order.
+    `datadigest` binds the payload without embedding it, which keeps the signed blob
+    small — the point of pairing signing with `ER_INCLUDE_RAW=false` (§8.9).
+
+    **Why the lengths.** An earlier form joined bare `key=value` lines with `\\n`
+    and escaped nothing, which is not injective: a value containing a newline
+    synthesizes an additional attribute line. These two attribute sets encoded to
+    byte-identical output, so one signature validated both —
+
+        {"type": "x", "source": "s", "id": "1", "phase": "a\\nsequence=999"}
+        {"type": "x", "source": "s", "id": "1", "phase": "a", "sequence": 999}
+
+    Recomputing the canonical form on the verifier does not help, because both
+    sides compute the same ambiguous encoding. Prefixing each key and value with
+    its length removes the ambiguity without rejecting any value. This was latent
+    rather than exploitable — every signed attribute reaching here is either
+    regex-validated (`correlationid`) or a server-set literal — but the design
+    rests on this encoding being unambiguous, so it has to actually be so.
+    `tests/test_signing.py` asserts the pair above now diverges.
+    """
+    present = sorted(k for k in SIGNED_ATTRS if attrs.get(k) not in (None, ""))
+    fields = [_field(k, attrs[k]) for k in present]
+    fields.append(_field("datadigest", "sha256:" + hashlib.sha256(data_bytes(data)).hexdigest()))
+    return "\n".join(fields).encode("utf-8")
 
 
 def _b64u(b: bytes) -> str:

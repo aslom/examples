@@ -168,6 +168,19 @@ Added in Phase 1:
 | `ER_KAFKA_RETRY_INITIAL_S` / `ER_KAFKA_RETRY_MAX_S` | `1` / `30` | Backoff bounds for the consumer's connect retry |
 | `ER_REQUIRE_SIGNATURE` | `false` | Refuse unsigned/badly-signed requests |
 | `ER_SIGNING_KEY_PATH` / `ER_VERIFY_KEY_PATH` | — | Ed25519 seed (hex, base64 or 32 raw bytes) |
+| `EB_AUTH_TOKENS` | — (open) | `name:token` pairs guarding the two routes that create work. **Empty means no authentication**, and no manifest sets it — see below |
+
+`EB_AUTH_TOKENS` deserves its own note because the default is fail-open. With it
+unset — which is how every manifest in `k8s/` ships — an unauthenticated
+`POST /v0/agents` returns 202 and spawns a `claude` run, and the OpenShift Route
+makes that reachable from outside the cluster. Auth on the HTTP surface is
+deferred to Phase 2 on purpose; until then, set this whenever the Route is
+reachable by anyone you would not hand a shell to. It guards only
+`POST /v0/agents` and `POST /v0/groups`; `GET`s, `/healthz`, `/docs`,
+`PUT /transcript` and `/continue` stay open by design. Read only from the
+environment, never from `config.toml`, which is committed. Deployment recipe and
+the full list of what stays open: `agentdocs/README_PHASE1.md` §
+"Submit-path authentication".
 
 Two of these are load-bearing in ways that are easy to miss.
 `ER_EVENTBRIDGE_URL` is what makes `/continue` survive a scale-to-zero *and* what

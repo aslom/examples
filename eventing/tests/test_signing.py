@@ -104,7 +104,8 @@ def test_canonical_is_independent_of_attribute_order():
 def test_canonical_omits_absent_attributes_rather_than_writing_them_empty():
     canon = S.canonical(_event().attrs, None).decode()
     assert "sequence=" not in canon, "an absent attribute must not appear at all"
-    assert "correlationid=brave-otter-4718" in canon
+    # Fields are netstring-style `len(key):key=len(value):value`.
+    assert "13:correlationid=16:brave-otter-4718" in canon
 
 
 def test_canonical_binds_the_payload_by_digest():
@@ -112,7 +113,7 @@ def test_canonical_binds_the_payload_by_digest():
     with_payload = S.canonical(e.attrs, e.data)
     changed = S.canonical(e.attrs, {"prompt": "hello", "max_turns": 2})
     assert with_payload != changed, "changing data must change the canonical form"
-    assert b"datadigest=sha256:" in with_payload
+    assert b"10:datadigest=" in with_payload and b"sha256:" in with_payload
 
 
 def test_canonical_changes_when_any_signed_attribute_changes():
@@ -125,6 +126,38 @@ def test_canonical_changes_when_any_signed_attribute_changes():
 def test_canonical_is_stable_across_calls():
     e = _event()
     assert S.canonical(e.attrs, e.data) == S.canonical(e.attrs, e.data)
+
+
+def test_canonical_is_injective_when_a_value_contains_the_field_separator():
+    """A newline in a value must not be able to synthesize another attribute.
+
+    Before the length prefixes these two encoded to identical bytes, so a single
+    signature validated both — `phase` carrying "a\\nsequence=999" was
+    indistinguishable from `phase="a"` plus `sequence=999`. Recomputing the
+    canonical form on the verifier could not catch it, because both sides
+    computed the same ambiguous encoding.
+    """
+    smuggled = {"type": "x", "source": "s", "id": "1", "phase": "a\nsequence=999"}
+    genuine = {"type": "x", "source": "s", "id": "1", "phase": "a", "sequence": 999}
+    assert S.canonical(smuggled, None) != S.canonical(genuine, None)
+
+
+def test_canonical_is_injective_when_a_value_contains_the_kv_separator():
+    """Same argument for `=`: it must not be able to re-split a field."""
+    a = {"type": "x", "source": "s", "id": "1", "phase": "a=b"}
+    b = {"type": "x", "source": "s", "id": "1", "phase": "a", "subject": "b"}
+    assert S.canonical(a, None) != S.canonical(b, None)
+
+
+def test_a_signature_does_not_transfer_between_the_ambiguous_pair():
+    """The end-to-end consequence: sign one, the other must not verify."""
+    seed = bytes(range(32))
+    pub = S.public_key(seed)
+    smuggled = {"type": "x", "source": "s", "id": "1", "phase": "a\nsequence=999"}
+    genuine = {"type": "x", "source": "s", "id": "1", "phase": "a", "sequence": 999}
+    sig = S.sign(S.canonical(genuine, None), seed)
+    assert S.verify(S.canonical(genuine, None), sig, pub)
+    assert not S.verify(S.canonical(smuggled, None), sig, pub)
 
 
 # ---- detached JWS over an event ---------------------------------------------

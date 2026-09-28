@@ -664,6 +664,43 @@ Two things that look alarming and are correct: a paused ScaledObject still repor
 `Active=True` while messages sit in the topic, and the Route stays resolvable
 while pointing at zero endpoints, so it serves a 503 rather than a DNS error.
 
+### Submit-path authentication (off by default — a deployed instance is open)
+
+**Read this before exposing a Route.** EventBridge's HTTP surface authenticates
+only when `EB_AUTH_TOKENS` is set, and **no manifest in `k8s/` sets it**. The
+default is therefore fail-open: `resolve_identity` returns "allowed, anonymous",
+an unauthenticated `POST /v0/agents` returns 202 and spawns a `claude` run, and
+`k8s/base/eventbridge-route.yaml` makes that reachable from outside the cluster.
+
+That is the intended Phase 1 posture — auth on the HTTP surface is deferred to
+Phase 2 — but it is a property of a deployment, not a detail, so set the tokens
+whenever the Route is reachable by anyone you would not hand a shell to:
+
+```bash
+kubectl -n kev1 create secret generic eventbridge-auth \
+  --from-literal=EB_AUTH_TOKENS="alice:$(openssl rand -hex 24),bob:$(openssl rand -hex 24)"
+# then reference it from the EventBridge Deployment's envFrom as a secretRef.
+```
+
+`EB_AUTH_TOKENS` is `name:token` pairs, comma separated. It is read **only** from
+the environment and deliberately never from `config.toml`, which is committed. The
+validated name rides onto the request event as `ce_submitter` and shows up as
+"Turn 1 — start — by alice" in the transcript view and on `/turns`.
+
+Two limits worth stating plainly:
+
+- Only the two routes that **create** work are guarded (`POST /v0/agents`,
+  `POST /v0/groups`). `GET`s, `/healthz`, `/docs`, `PUT /transcript` and
+  `/continue` stay open by design — `/continue` because authenticating it would
+  put a long-lived bearer token inside every ntfy notification; it relies on the
+  unguessable `correlationid` as a capability URL instead.
+- `submitter` is **not signed**, and Kafka is plaintext. The claim is "EventBridge
+  refuses unauthenticated submissions and records who it believes submitted this",
+  not "this event proves who submitted it."
+
+Setting `EB_AUTH_TOKENS` will 401 the `/eventbridge` CLI, the three e2e scripts
+and the README `curl`s until they are taught to send the header.
+
 ### Signed events (optional, off by default)
 
 `ER_REQUIRE_SIGNATURE=false` in the ConfigMap. To turn it on, mount an Ed25519

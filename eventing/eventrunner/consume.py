@@ -71,7 +71,13 @@ class Consumer(threading.Thread):
         self._cfg = cfg
         self._router = router
         self._topic = cfg.request_topic
-        self._stop = threading.Event()
+        # `_stopping`, not `_stop`: this subclasses threading.Thread, and on CPython
+        # <=3.13 `Thread._stop` is a real method that `join()` calls through
+        # `_wait_for_tstate_lock`. Shadowing it with an Event makes join() raise
+        # `TypeError: 'Event' object is not callable`. 3.14 happens not to take that
+        # path, which is why it only shows up on an older interpreter. Same rename
+        # applied to the other four Thread subclasses in this package.
+        self._stopping = threading.Event()
         # Intake and shutdown are separate signals. On SIGTERM we want to stop
         # taking NEW work immediately but keep polling, because the poll loop is
         # what commits offsets as the in-flight runs finish draining (§8.3).
@@ -88,7 +94,7 @@ class Consumer(threading.Thread):
 
     # ---- lifecycle ----
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
 
     def stop_intake(self) -> None:
         """Stop accepting new records; keep polling so commits still flow."""
@@ -120,7 +126,7 @@ class Consumer(threading.Thread):
         countdown rather than as silence.
         """
         delay = self._cfg.kafka_retry_initial_s
-        while not self._stop.is_set():
+        while not self._stopping.is_set():
             self._connect_attempts += 1
             try:
                 c = self._factory()
@@ -135,7 +141,7 @@ class Consumer(threading.Thread):
                 # Keep the heartbeat fresh while retrying: a pod waiting for a
                 # rolling broker is alive and must not be restarted for it.
                 self._hb.touch()
-                if self._stop.wait(timeout=delay):
+                if self._stopping.wait(timeout=delay):
                     return None
                 delay = min(delay * 2, self._cfg.kafka_retry_max_s)
         return None
@@ -143,7 +149,7 @@ class Consumer(threading.Thread):
     def run(self) -> None:
         """Outer supervisor: the thread must survive anything the loop throws."""
         self._hb.touch()
-        while not self._stop.is_set():
+        while not self._stopping.is_set():
             c = self._connect_with_retry()
             if c is None:
                 break
@@ -154,7 +160,7 @@ class Consumer(threading.Thread):
                 # trace and reconnect rather than letting the thread end.
                 _elog("consume loop raised; reconnecting:\n" + traceback.format_exc())
                 self._hb.touch()
-                self._stop.wait(timeout=self._cfg.kafka_retry_initial_s)
+                self._stopping.wait(timeout=self._cfg.kafka_retry_initial_s)
             finally:
                 try:
                     c.close()
@@ -165,14 +171,14 @@ class Consumer(threading.Thread):
     # ---- the loop -----------------------------------------------------------
     def _consume_loop(self, c: KafkaConsumer) -> None:
         cap = max(1, self._cfg.max_concurrent) * 2
-        while not self._stop.is_set():
+        while not self._stopping.is_set():
             self._apply_backpressure(c, cap)
             batch = c.poll(timeout_ms=500)
             self._hb.touch()
             self._seed_offsets(c, batch)
             for tp, records in (batch or {}).items():
                 for rec in records:
-                    if self._stop.is_set() or not self._intake_open.is_set():
+                    if self._stopping.is_set() or not self._intake_open.is_set():
                         break
                     self._handle(rec)
             self._commit_ready(c)
