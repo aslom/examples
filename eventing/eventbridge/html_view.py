@@ -141,6 +141,8 @@ def group_by_turns(events: list[dict[str, Any]], prompts: list[dict[str, Any]]) 
         t["prompt"] = p["prompt"] if p else None
         t["mode"] = (p["mode"] if p else None) or ("start" if i == 0 else "continue")
         t["submitted_utc"] = p["submitted_utc"] if p else None
+        # None for turns submitted before auth existed, or while it is disabled.
+        t["submitter"] = (p.get("submitter") if p else None)
 
     return turns
 
@@ -349,11 +351,12 @@ PAGE = """<!doctype html>
     if (preview.length > 120) preview = preview.slice(0, 120) + "…";
     var statsRow = statsLine(stats);
     var detailsCount = liveCards.length;
+    var by = latest.submitter ? '<span class="mode">· by ' + esc(latest.submitter) + '</span>' : '';
 
     var turnHtml =
       '<details class="turn" open>' +
         '<summary>' +
-          '<span><span class="idx">Turn ' + idx + '</span><span class="mode">· ' + esc(mode) + '</span></span>' +
+          '<span><span class="idx">Turn ' + idx + '</span><span class="mode">· ' + esc(mode) + '</span>' + by + '</span>' +
           '<span class="preview">' + esc(preview) + '</span>' +
           '<span class="stats">' + esc(statsRow) + '</span>' +
         '</summary>' +
@@ -443,9 +446,11 @@ def _turn_html(t: dict[str, Any], is_latest: bool) -> str:
 
     # Latest turn opens by default; earlier turns collapse to reduce scroll.
     open_attr = " open" if is_latest else ""
+    who = t.get("submitter")
+    by = f'<span class="mode">· by {html.escape(str(who))}</span>' if who else ""
     summary = (
         f'<summary><span><span class="idx">Turn {idx}</span>'
-        f'<span class="mode">· {html.escape(mode)}</span></span>'
+        f'<span class="mode">· {html.escape(mode)}</span>{by}</span>'
         f'<span class="preview">{html.escape(preview)}</span>'
         f'<span class="stats">{html.escape(stats_line)}</span></summary>'
     )

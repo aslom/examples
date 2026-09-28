@@ -6,6 +6,8 @@ import pathlib
 import tomllib
 from dataclasses import dataclass, field
 
+from eventbridge import auth
+
 
 @dataclass
 class NtfyCfg:
@@ -39,6 +41,12 @@ class Cfg:
     # never completes, and therefore never sends its completion notification — the
     # failure mode is silence, which is the worst one. 0 disables.
     group_deadline_s: float = 3600.0
+    # Bearer tokens for the submit path, as {token: name}. Empty disables auth
+    # entirely, which is the default: the demo must keep working out of the box,
+    # and a token is a capability that cannot be baked into a default. Supplied
+    # only via EB_AUTH_TOKENS — deliberately never read from config.toml, which
+    # is committed (tests/test_manifests.py pins the same rule for NTFY_TOKEN).
+    auth_tokens: dict[str, str] = field(default_factory=dict)
     ntfy: NtfyCfg = field(default_factory=NtfyCfg)
 
 
@@ -85,6 +93,11 @@ def load() -> Cfg:
     cfg.transcript_max_bytes = int(e("EB_TRANSCRIPT_MAX_BYTES",
                                      str(cfg.transcript_max_bytes)))
     cfg.group_deadline_s = float(e("EB_GROUP_DEADLINE_S", str(cfg.group_deadline_s))) or None
+    # `name:token,name2:token2`. Absent or empty leaves auth disabled — same
+    # guard shape as NTFY_PHASES below, so an unset var never clobbers a default.
+    auth_env = e("EB_AUTH_TOKENS")
+    if auth_env:
+        cfg.auth_tokens = auth.parse_tokens(auth_env)
 
     cfg.ntfy.enabled  = (e("NTFY_ENABLED", "true" if cfg.ntfy.enabled else "false").lower() == "true")
     cfg.ntfy.base_url = e("NTFY_BASE_URL", cfg.ntfy.base_url)

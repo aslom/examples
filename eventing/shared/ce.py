@@ -41,6 +41,11 @@ EXT_CAUSATIONID   = "causationid"
 EXT_SIGNATURE     = "signature"
 # Phase 1 §21: the batch a correlation belongs to. At most one per correlation.
 EXT_GROUPID       = "groupid"
+# The authenticated caller that submitted this request, from EB_AUTH_TOKENS.
+# Absent when auth is disabled. NOT in signing.SIGNED_ATTRS, so it is unsigned
+# and forgeable by anyone with write access to the requests topic — it records
+# who EventBridge believes submitted, not cryptographic proof.
+EXT_SUBMITTER     = "submitter"
 
 CE_HEADER_PREFIX = "ce_"
 CORE_ATTRS = {"specversion", "type", "source", "id", "time",

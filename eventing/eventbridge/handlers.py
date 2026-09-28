@@ -9,6 +9,7 @@ from typing import Any
 
 from shared import ce
 
+from eventbridge import auth
 from eventbridge.config import Cfg
 from eventbridge.correlation import REGEX as CORR_REGEX
 from eventbridge.correlation import Minter
@@ -61,6 +62,12 @@ def _read_body(environ, limit: int) -> tuple[bytes | None, str | None]:
     return body, None
 
 
+def _deny(start_response, reason: str) -> list[bytes]:
+    """401 with the Bearer challenge. `_json` already takes extra headers."""
+    return _json(start_response, "401 Unauthorized", {"error": reason},
+                 [("WWW-Authenticate", auth.CHALLENGE)])
+
+
 def _read_form(environ) -> dict:
     try:
         n = int(environ.get("CONTENT_LENGTH") or 0)
@@ -88,6 +95,9 @@ class Handlers:
 
     # ---- start ----
     def start_agent(self, environ, start_response, **_):
+        submitter, why = auth.resolve_identity(environ, self.cfg.auth_tokens)
+        if why:
+            return _deny(start_response, why)
         body = _read_json(environ)
         prompt = body.get("prompt")
         if not prompt:
@@ -103,7 +113,7 @@ class Handlers:
         sess = ce.session_uuid(corr)
         workdir = str(pathlib.Path(self.cfg.tmpdir) / "eventrunner" / "work" / corr)
         self.store.upsert_session(corr, sess, workdir, prompt)
-        self.store.insert_prompt(corr, "start", prompt)
+        self.store.insert_prompt(corr, "start", prompt, submitter=submitter)
         if groupid:
             # Membership before publication: the reverse order leaves a window where a
             # fast agent's terminal event arrives for a member nobody has recorded.
@@ -111,7 +121,7 @@ class Handlers:
         event_id = self.producer.publish_request(
             prompt=prompt, correlationid=corr, sessionuuid=sess,
             mode="start", model=model, max_turns=max_turns, subject="start",
-            groupid=groupid,
+            groupid=groupid, submitter=submitter,
         )
         out = {
             "correlationid": corr, "sessionuuid": sess,
@@ -132,6 +142,9 @@ class Handlers:
         the batch scale at all: every request is published before any is watched, so
         lag reaches N and KEDA scales past one pod.
         """
+        submitter, why = auth.resolve_identity(environ, self.cfg.auth_tokens)
+        if why:
+            return _deny(start_response, why)
         if self.groups is None:
             return _json(start_response, "503 Service Unavailable",
                          {"error": "group support not enabled"})
@@ -166,7 +179,8 @@ class Handlers:
             })
         corrs = self.groups.submit_members(
             groupid, [str(x) for x in prompts],
-            max_turns=int(body.get("max_turns", 3)), model=body.get("model"))
+            max_turns=int(body.get("max_turns", 3)), model=body.get("model"),
+            submitter=submitter)
         return _json(start_response, "202 Accepted", {
             "groupid": groupid, "created": True, "expected": expected or len(corrs),
             "members": corrs,
@@ -354,6 +368,7 @@ class Handlers:
             row = {
                 "turn_index":    t.get("turn_index"),
                 "mode":          t.get("mode"),
+                "submitter":     t.get("submitter"),
                 "prompt":        t.get("prompt"),
                 "assistant_text": t.get("assistant_text"),
                 "started":       t.get("started"),
