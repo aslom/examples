@@ -9,9 +9,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from shared import ce
-
 from eventbridge.groups import completion_reason, progress
+from shared import ce
 
 
 def _log(msg: str) -> None:

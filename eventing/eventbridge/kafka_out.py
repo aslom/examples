@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from kafka import KafkaProducer
+
 from shared import ce
 
 

@@ -1,5 +1,5 @@
 """Word-pair correlation ID generator: regex + collision guard."""
-from eventbridge.correlation import Minter, REGEX
+from eventbridge.correlation import REGEX, Minter
 
 
 def test_regex_matches_generated_ids():

@@ -5,9 +5,9 @@ import threading
 from typing import Callable
 
 from kafka import KafkaConsumer
-from shared import ce
 
 from eventbridge.store import Store
+from shared import ce
 
 
 class Consumer(threading.Thread):

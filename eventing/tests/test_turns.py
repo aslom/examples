@@ -1,8 +1,6 @@
 """group_by_turns + prompts persistence — the turn-grouped chat view."""
 import pathlib
 
-import pytest
-
 from eventbridge.html_view import group_by_turns, render
 from eventbridge.store import Store
 

@@ -7,22 +7,21 @@ import signal
 import sys
 import threading
 
-from shared.pidfile import PidFile
-
 from eventbridge.config import load
 from eventbridge.correlation import Minter
 from eventbridge.group_service import GroupService
 from eventbridge.handlers import Handlers
 from eventbridge.http_server import make
+from eventbridge.kafka_group_mirror import GroupMirror
 from eventbridge.kafka_in import Consumer
 from eventbridge.kafka_out import Producer
-from eventbridge.kafka_group_mirror import GroupMirror
 from eventbridge.kafka_requests_mirror import RequestsMirror
 from eventbridge.netcands import enumerate_candidates, format_startup_hint
 from eventbridge.ntfy import NtfyPublisher
 from eventbridge.openapi import spec
 from eventbridge.router import Dispatcher
 from eventbridge.store import Store
+from shared.pidfile import PidFile
 
 
 def main() -> int:

@@ -10,6 +10,7 @@ import io
 import json
 
 import pytest
+
 from eventbridge import auth
 from eventbridge.config import Cfg as EbCfg
 from eventbridge.group_service import GroupService

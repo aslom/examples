@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 NAMESPACE = uuid.UUID("6e5f8a90-0000-5000-a000-000000000001")

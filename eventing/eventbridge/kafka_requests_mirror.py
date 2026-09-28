@@ -18,9 +18,9 @@ import os
 import threading
 
 from kafka import KafkaConsumer
-from shared import ce
 
 from eventbridge.store import Store
+from shared import ce
 
 
 class RequestsMirror(threading.Thread):

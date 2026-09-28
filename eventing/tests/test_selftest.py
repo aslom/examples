@@ -5,8 +5,11 @@ synthetic inputs and let the caller stub the TCP probe."""
 from unittest.mock import patch
 
 from eventbridge.selftest import (
-    ProbeResult, _decide_verdict, _is_public_tunnel_host,
-    format_report, probe_candidates,
+    ProbeResult,
+    _decide_verdict,
+    _is_public_tunnel_host,
+    format_report,
+    probe_candidates,
 )
 
 

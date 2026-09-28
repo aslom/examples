@@ -24,6 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from proclib import Checks  # noqa: E402
+
 from shared.pidfile import default_dir  # noqa: E402
 
 PREFIX = "stop"

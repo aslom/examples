@@ -34,3 +34,26 @@ packages = ["eventbridge", "eventrunner", "shared"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Without this section these files inherit the repository root's ruff config,
+# which targets py311 — while this package requires >=3.14 and uses the free-
+# threaded build. The root config is right for the agents and tools beside it;
+# it is simply not describing this package.
+[tool.ruff]
+line-length = 120
+# py313 rather than py314: the pinned ruff 0.11.4 does not recognise py314 yet
+# ("unknown variant"). This is still closer than the root's py311, and can be
+# raised once the pin moves.
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+# E501/E402/W291 are ignored at the root too; kept here so this section is a
+# complete description rather than a partial override.
+#
+# E701/E702 are the deliberate house style of this package: one-line
+# `try: x` / `except Exception: pass` around best-effort cleanup, and paired
+# `a = 1; b = 2` assignments. Expanding ~40 of them would add vertical noise to
+# shutdown and error paths whose brevity is the point, so the style is declared
+# rather than rewritten.
+ignore = ["E501", "E402", "W291", "E701", "E702"]
