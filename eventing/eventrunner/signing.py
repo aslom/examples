@@ -185,18 +185,47 @@ def _b64u_dec(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def sign_event(event, seed: bytes) -> str:
+def sign_event(event, seed: bytes, kid: str | None = None) -> str:
     """Return the detached-JWS value for `ce_signature`.
 
     Detached: the payload is not carried inside the JWS (it is the event itself),
     so the compact serialization has an empty middle segment —
     `<protected>..<signature>`, as RFC 7515 Appendix F describes.
+
+    `kid` names the key that signed this, so a verifier holding several approved
+    public keys can select the right one instead of trying each. It is part of the
+    protected header and therefore covered by the signature, so it cannot be
+    swapped to point at a different key. Omitting it stays valid: a verifier with
+    exactly one key does not need it.
     """
-    protected = _b64u(json.dumps({"alg": "EdDSA", "typ": "ce+jws"},
-                                 separators=(",", ":"), sort_keys=True).encode())
+    header: dict[str, Any] = {"alg": "EdDSA", "typ": "ce+jws"}
+    if kid:
+        header["kid"] = kid
+    protected = _b64u(json.dumps(header, separators=(",", ":"),
+                                 sort_keys=True).encode())
     payload = _b64u(canonical(event.attrs, event.data))
     sig = sign(f"{protected}.{payload}".encode(), seed)
     return f"{protected}..{_b64u(sig)}"
+
+
+def token_kid(token: str) -> str | None:
+    """The `kid` from a detached-JWS token's protected header, or None.
+
+    Read BEFORE verification, to choose which key to verify with — so treat it as
+    a hint, not a fact. It only becomes trustworthy once `verify_signature`
+    succeeds with the key it named, because the header is part of the signed
+    input. A token naming an unapproved key is refused for that reason, not
+    because the `kid` itself was disbelieved.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        header = json.loads(_b64u_dec(parts[0]))
+    except Exception:  # noqa: BLE001
+        return None
+    kid = header.get("kid") if isinstance(header, dict) else None
+    return kid if isinstance(kid, str) and kid else None
 
 
 def verify_signature(event, pub: bytes) -> tuple[bool, str]:
