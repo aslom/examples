@@ -13,11 +13,9 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
 
 from eventrunner.config import API_KEY_VARS, Cfg
 from eventrunner.emit import Emitter
-
 
 # Env vars forwarded to the `claude` subprocess. The child does NOT inherit
 # our full environment — only these keys pass through when they are set on
@@ -459,7 +457,7 @@ def _run_mock(emitter: Emitter, corr: str, session: str, payload: dict,
                  sequence=emitter.next_seq(corr), phase="result", final=True,
                  data={"type": "result", "role": "final", "text": None,
                        "text_echoes_prior_assistant": True,
-                       "stats": {"num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.0,
+                       "stats": {"num_turns": 1, "total_cost_usd": 0.0,
                                  "usage": {"input_tokens": len(prompt), "output_tokens": len(reply)},
                                  "duration_ms": int(delay * 1000)}},
                  causationid=causation, groupid=groupid)

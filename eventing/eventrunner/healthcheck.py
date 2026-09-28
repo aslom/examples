@@ -22,9 +22,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from shared.heartbeat import Heartbeat
-
 from eventrunner.config import load
+from shared.heartbeat import Heartbeat
 
 
 def main(argv: list[str] | None = None) -> int:

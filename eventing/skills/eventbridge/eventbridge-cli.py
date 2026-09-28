@@ -145,7 +145,7 @@ def _print_event_compact(event, state):
         if not state.get("assistant_printed") and text:
             print(f"ASSISTANT: {text}")
             state["assistant_printed"] = True
-        print(f"✔ done" + (f" · {summary}" if summary else ""))
+        print("✔ done" + (f" · {summary}" if summary else ""))
     elif role == "error" or event.get("phase") == "error":
         msg = text or json.dumps(d, ensure_ascii=False)[:200]
         print(f"✗ error: {msg}")

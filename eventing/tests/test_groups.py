@@ -12,6 +12,7 @@ import json
 import pathlib
 
 import pytest
+
 from eventbridge.config import Cfg as EbCfg
 from eventbridge.group_service import GroupService
 from eventbridge.group_view import render

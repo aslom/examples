@@ -11,11 +11,12 @@ import datetime as dt
 import threading
 import time
 
+from kafka.errors import KafkaConnectionError
+from kafka.structs import OffsetAndMetadata, TopicPartition
+
 from eventrunner.config import Cfg, load
 from eventrunner.consume import Consumer, event_age_s
 from eventrunner.offsets import OffsetLedger
-from kafka.errors import KafkaConnectionError
-from kafka.structs import OffsetAndMetadata, TopicPartition
 from shared import ce
 from shared.heartbeat import Heartbeat
 

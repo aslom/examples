@@ -11,6 +11,7 @@ import binascii
 import json
 
 import pytest
+
 from eventrunner import signing as S
 from shared import ce
 

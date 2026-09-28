@@ -7,8 +7,6 @@ import time
 import urllib.parse
 from typing import Any
 
-from shared import ce
-
 from eventbridge import auth
 from eventbridge.config import Cfg
 from eventbridge.correlation import REGEX as CORR_REGEX
@@ -17,6 +15,7 @@ from eventbridge.html_view import render
 from eventbridge.kafka_out import Producer
 from eventbridge.openapi import SWAGGER_HTML, spec
 from eventbridge.store import Store
+from shared import ce
 
 
 def _json(start_response, status: str, obj: Any, headers: list[tuple[str, str]] | None = None) -> list[bytes]:

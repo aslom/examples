@@ -1,11 +1,7 @@
 """EventRunner forwards a curated env allowlist to the claude subprocess."""
-import io
-import os
 
-import pytest
 
-from eventrunner.runner import (_CLAUDE_ROUTING, child_env, log_forwarded_env,
-                                _redact)
+from eventrunner.runner import _CLAUDE_ROUTING, _redact, child_env, log_forwarded_env
 
 
 def test_only_allowlisted_vars_are_forwarded(monkeypatch):

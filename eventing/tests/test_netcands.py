@@ -2,8 +2,12 @@
 address for EVENT_BRIDGE_PUBLIC_BASE_URL under Cisco TUNNELALL / dev laptops
 where routing intuition is easily wrong."""
 from eventbridge.netcands import (
-    Candidate, _classify, _parse_ifconfig, _parse_ip_addr,
-    format_startup_hint, enumerate_candidates,
+    Candidate,
+    _classify,
+    _parse_ifconfig,
+    _parse_ip_addr,
+    enumerate_candidates,
+    format_startup_hint,
 )
 
 

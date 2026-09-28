@@ -6,7 +6,6 @@ import pathlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-
 # Env vars that carry an Anthropic credential. Their presence is what decides
 # whether we default to real `claude` or to mock mode — a container with no key
 # would otherwise spawn claude only to have it fail on auth, turning every

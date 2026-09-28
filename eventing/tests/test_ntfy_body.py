@@ -6,10 +6,13 @@ the developer's Mac.
 """
 import pathlib
 
-from eventbridge.ntfy import (
-    compose_body, compose_title, _stats_line, NtfyPublisher,
-)
 from eventbridge.config import NtfyCfg
+from eventbridge.ntfy import (
+    NtfyPublisher,
+    _stats_line,
+    compose_body,
+    compose_title,
+)
 from eventbridge.store import Store
 
 

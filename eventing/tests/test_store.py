@@ -1,7 +1,6 @@
 """SQLite Store: insert, filter by sequence, SSE notify."""
-import tempfile
-import threading
 import pathlib
+import threading
 
 from eventbridge.store import Store
 

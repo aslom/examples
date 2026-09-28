@@ -19,6 +19,7 @@ import json
 import pathlib
 
 import pytest
+
 from eventbridge.config import Cfg as EbCfg
 from eventbridge.handlers import Handlers
 from eventbridge.store import Store
