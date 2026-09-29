@@ -306,7 +306,17 @@ def verify_signature(event, pub: bytes) -> tuple[bool, str]:
 
 def load_seed(path: str | pathlib.Path) -> bytes:
     """Read a 32-byte Ed25519 seed from a Secret-mounted file (hex, base64 or raw)."""
-    raw = pathlib.Path(path).read_bytes().strip()
+    # Check the unstripped length first. A raw 32-byte key can legitimately begin
+    # or end with a byte that is ASCII whitespace (0x09 0x0a 0x0b 0x0c 0x0d 0x20),
+    # and stripping before the length test truncates it to 31 bytes — which then
+    # fails `decode(errors="strict")` on arbitrary binary and reports the key as the
+    # wrong length when it is not. That is ~4.6% of random keys. Stripping still
+    # happens below, where it is wanted, for hex/base64 written with a trailing
+    # newline.
+    data = pathlib.Path(path).read_bytes()
+    if len(data) == 32:
+        return bytes(data)
+    raw = data.strip()
     if len(raw) == 32:
         return bytes(raw)
     text = raw.decode(errors="strict").strip()
@@ -329,7 +339,10 @@ def verify_event(event, cfg) -> tuple[bool, str]:
         return False, ("ER_REQUIRE_SIGNATURE=true but neither ER_VERIFY_KEY_PATH "
                        "nor ER_SIGNING_KEY_PATH is set")
     try:
-        seed_or_pub = pathlib.Path(key_path).read_bytes().strip()
+        # Same rule as load_seed: test the unstripped length first, so a raw key
+        # with a whitespace edge byte is not truncated out of the 32-byte path.
+        data = pathlib.Path(key_path).read_bytes()
+        seed_or_pub = data if len(data) == 32 else data.strip()
         pub = (bytes(seed_or_pub) if len(seed_or_pub) == 32
                else public_key(load_seed(key_path)))
     except Exception as e:  # noqa: BLE001

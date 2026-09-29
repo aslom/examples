@@ -241,6 +241,21 @@ def test_load_seed_accepts_hex_base64_and_raw(tmp_path):
     assert S.load_seed(raw_f) == seed
 
 
+@pytest.mark.parametrize("edge", [b"\x20", b"\x09", b"\x0a", b"\x0d", b"\x0b", b"\x0c"])
+def test_load_seed_keeps_a_raw_key_whose_edge_byte_is_whitespace(tmp_path, edge):
+    """A key byte that happens to be ASCII whitespace must not be stripped.
+
+    `read_bytes().strip()` before the length check truncated these to 31 bytes and
+    then raised "not a 32-byte Ed25519 seed" — for ~4.6% of random raw keys, since
+    six of 256 byte values are whitespace and either end will do it.
+    """
+    for seed in (edge + bytes(range(1, 32)), bytes(range(1, 32)) + edge):
+        f = tmp_path / "raw"
+        f.write_bytes(seed)
+        assert len(seed) == 32
+        assert S.load_seed(f) == seed
+
+
 def test_load_seed_rejects_a_wrong_length_key(tmp_path):
     f = tmp_path / "bad"
     f.write_text("deadbeef\n")

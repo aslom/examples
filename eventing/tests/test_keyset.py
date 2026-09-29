@@ -232,7 +232,12 @@ def test_text_plain_payload_roundtrips():
 # ---- the two together: kid selects, then verification decides ---------------
 
 def test_approved_agent_verifies_and_unapproved_does_not(tmp_path):
-    """The whole mechanism in one test: the keyset is the authorization list."""
+    """The intended mechanism, composed by hand: the keyset as authorization list.
+
+    NB this wires `token_kid` -> `select` -> `verify_signature` itself, because no
+    production path does yet — see the note in shared/keyset.py. It proves the
+    primitives compose, not that the runner enforces anything.
+    """
     ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
 
     approved = _event()
