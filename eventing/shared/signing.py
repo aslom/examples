@@ -31,7 +31,10 @@ import binascii
 import hashlib
 import json
 import pathlib
+import sys
 from typing import Any
+
+from shared import ce
 
 # ---- Ed25519 (RFC 8032), pure Python ---------------------------------------
 
@@ -256,6 +259,37 @@ def sign_event(event, seed: bytes, kid: str | None = None) -> str:
     return f"{protected}..{_b64u(sig)}"
 
 
+def sign_into(event, seed: bytes | None, kid: str | None = None) -> bool:
+    """Assign `event.attrs["signature"]` when a seed is configured. Returns whether
+    it signed.
+
+    `sign_event` does not mutate, so every producer would otherwise repeat the same
+    three lines; this is the one place that decides what "signing is enabled" means.
+
+    **Never raises.** A signing failure here would turn a key-configuration mistake
+    into a total publish outage — every request rejected because one seed file has a
+    stray byte. Degrading to unsigned is the lesser harm, and it is safe only because
+    the verifying side is what enforces: an unsigned event is refused there when
+    enforcement is on. The loud failure belongs at startup instead, where the seed is
+    loaded once and a bad path stops the process.
+    """
+    if seed is None:
+        return False
+    try:
+        # `sign()` does not check the seed length — only `public_key()` does — so a
+        # truncated key file would produce a well-formed signature that no verifier
+        # can ever match, reported to the operator as success. Check it here, where
+        # production signing enters, so the failure names the key instead.
+        if len(seed) != 32:
+            raise ValueError(f"an Ed25519 seed is 32 bytes, got {len(seed)}")
+        event.attrs["signature"] = sign_event(event, seed, kid)
+        return True
+    except Exception as e:  # noqa: BLE001 - see above: publishing unsigned beats not publishing
+        print(f"[signing] could not sign {event.get('id')!r}, publishing unsigned: {e!r}",
+              file=sys.stderr, flush=True)
+        return False
+
+
 def token_kid(token: str) -> str | None:
     """The `kid` from a detached-JWS token's protected header, or None.
 
@@ -300,6 +334,85 @@ def verify_signature(event, pub: bytes) -> tuple[bool, str]:
     if not verify(f"{protected}.{payload}".encode(), sig, pub):
         return False, "signature does not verify over the canonical attributes"
     return True, "ok"
+
+
+# ---- authorization: the keyset as an allowlist -------------------------------
+
+def verify_with_keyset(event, ks, *, expect_kid: str | None = None) -> tuple[bool, str]:
+    """(ok, reason) for one event against an approved-key set.
+
+    The composition `tests/test_keyset.py` previously had to hand-wire: read the
+    `kid`, select the key it names, then let the signature decide. The `kid` is only
+    a hint until that last step succeeds, because the header is signed input — so a
+    token naming an unapproved key is refused for *naming* it, not because the `kid`
+    itself was disbelieved.
+
+    `expect_kid` pins the signer to one identity. Group lifecycle events use it: the
+    keyset is otherwise flat, so any approved runner could forge a `group.completed`
+    and end a batch early. Passing it restricts a class of event to one key while
+    leaving the rest of the set alone.
+
+    **Never raises**, so a caller inside a consumer loop needs no guard of its own to
+    stay alive. Every exit returns a distinct reason, because a rejection nobody can
+    explain gets diagnosed as "signing is broken" and switched off.
+    """
+    token = event.get("signature")
+    if not token:
+        return False, "no ce_signature attribute"
+    kid = token_kid(token)
+    if expect_kid and kid != expect_kid:
+        return False, (f"expected a signature from kid {expect_kid!r}, "
+                       f"got {kid!r}")
+    pub = ks.select(kid)
+    if pub is None:
+        if kid is None:
+            return False, (f"the token names no kid and the approved set holds "
+                           f"{len(ks)} keys, so it is ambiguous")
+        return False, f"kid {kid!r} is not in the approved key set"
+    return verify_signature(event, pub)
+
+
+def verify_request(event, cfg, ks=None) -> tuple[bool, str]:
+    """(ok, reason) for a request event, using whichever key source is configured.
+
+    Prefers the keyset, which is an allowlist of many approved agents. Falls back to
+    `verify_event`'s single-key path so `ER_REQUIRE_SIGNATURE=true` with only
+    `ER_VERIFY_KEY_PATH` set keeps behaving as it did — that combination predates the
+    keyset and is still the simplest useful deployment.
+    """
+    if ks is not None:
+        return verify_with_keyset(event, ks)
+    return verify_event(event, cfg)
+
+
+def response_decision(event, ks, *, require: bool,
+                      bridge_kid: str | None = None) -> tuple[bool, str]:
+    """(accept_as_is, reason) for one event off the responses topic.
+
+    Pure: no I/O, no logging, and **it does not touch `event`** — the caller owns the
+    rewrite, which is what makes this testable without a Kafka consumer.
+
+    Collapsing three questions into one answer is deliberate; it leaves the caller no
+    policy to get wrong:
+
+    * `ks is None` — verification is not configured. Accept, as today.
+    * verified — accept.
+    * not verified and `require` false — **audit mode**: accept, but hand back the
+      reason so the caller can log it. Enforcement rewrites persisted rows and pages
+      a phone, so there has to be a way to watch the reject rate first.
+    * not verified and `require` true — reject; the caller stores it as `phase=error`.
+
+    `bridge_kid` pins group lifecycle events to EventBridge's own key. It is only
+    applied when set, so a single-key deployment — where `KeySet.select(None)` returns
+    the sole key and nothing needs to name a kid — keeps working untouched.
+    """
+    if ks is None:
+        return True, "verification not enabled"
+    expect = bridge_kid if (bridge_kid and ce.is_group_event(event)) else None
+    ok, why = verify_with_keyset(event, ks, expect_kid=expect)
+    if ok:
+        return True, why
+    return (not require), why
 
 
 # ---- key loading ------------------------------------------------------------

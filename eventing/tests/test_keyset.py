@@ -234,9 +234,10 @@ def test_text_plain_payload_roundtrips():
 def test_approved_agent_verifies_and_unapproved_does_not(tmp_path):
     """The intended mechanism, composed by hand: the keyset as authorization list.
 
-    NB this wires `token_kid` -> `select` -> `verify_signature` itself, because no
-    production path does yet — see the note in shared/keyset.py. It proves the
-    primitives compose, not that the runner enforces anything.
+    Kept hand-wired even though `signing.verify_with_keyset` now does exactly this in
+    production, because a test that reaches through the primitives one at a time says
+    where a failure is — `select` returned nothing, or the signature did not verify —
+    which a single boolean from the composed function cannot.
     """
     ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
 
@@ -263,3 +264,143 @@ def test_a_rogue_key_claiming_an_approved_kid_is_refused(tmp_path):
     pub = ks.select(S.token_kid(back.get("signature")))
     assert pub == PUB                      # kid resolves...
     assert not S.verify_signature(back, pub)[0]   # ...but the signature does not
+
+
+# ---- sign_into: the one place that decides "signing is enabled" --------------
+
+def test_sign_into_is_a_no_op_without_a_seed():
+    """The default path, asserted rather than assumed: no seed, no attribute."""
+    e = _event()
+    assert S.sign_into(e, None) is False
+    assert "signature" not in e.attrs
+
+
+def test_sign_into_signs_and_the_result_verifies():
+    e = _event()
+    assert S.sign_into(e, SEED, "runner-01") is True
+    assert S.verify_signature(e, PUB) == (True, "ok")
+    assert S.token_kid(e.attrs["signature"]) == "runner-01"
+
+
+def test_sign_into_degrades_rather_than_raising_on_a_bad_seed():
+    """A key-config mistake must not take out publishing entirely.
+
+    Unsigned is safe because the verifying side refuses unsigned events when
+    enforcement is on; a raise here would reject 100% of traffic at the producer.
+    """
+    e = _event()
+    assert S.sign_into(e, b"\x01" * 31) is False   # 31 bytes is not an Ed25519 seed
+    assert "signature" not in e.attrs
+
+
+# ---- verify_with_keyset: the composed authorization check --------------------
+
+def test_verify_with_keyset_accepts_an_approved_signer(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    e = _event()
+    S.sign_into(e, SEED, "runner-01")
+    back = ce.from_kafka_binary(*ce.to_kafka_binary(e))
+    ok, why = S.verify_with_keyset(back, ks)
+    assert ok, why
+
+
+def test_verify_with_keyset_reports_a_missing_signature(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    ok, why = S.verify_with_keyset(_event(), ks)
+    assert not ok and "no ce_signature" in why
+
+
+def test_verify_with_keyset_reports_an_unapproved_kid(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    e = _event()
+    S.sign_into(e, SEED2, "runner-99")
+    ok, why = S.verify_with_keyset(e, ks)
+    assert not ok and "'runner-99' is not in the approved key set" in why
+
+
+def test_verify_with_keyset_reports_an_ambiguous_unnamed_token(tmp_path):
+    """Two approved keys and a token naming neither: guessing would accept a
+    signature from *any* approved agent for an event that claimed none of them."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex(),
+                                       "runner-02": PUB2.hex()}))
+    e = _event()
+    S.sign_into(e, SEED)                      # no kid
+    ok, why = S.verify_with_keyset(e, ks)
+    assert not ok and "ambiguous" in why
+
+
+def test_verify_with_keyset_accepts_an_unnamed_token_against_a_single_key(tmp_path):
+    """The friendly path: one approved key means nothing has to name it."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    e = _event()
+    S.sign_into(e, SEED)                      # no kid
+    ok, why = S.verify_with_keyset(e, ks)
+    assert ok, why
+
+
+def test_expect_kid_pins_the_signer_to_one_identity(tmp_path):
+    """What stops an approved runner forging an EventBridge group event."""
+    ks = keyset.load(_write(tmp_path, {"eventbridge": PUB.hex(),
+                                       "runner-01": PUB2.hex()}))
+    e = _event(type=ce.TYPE_GROUP_STARTED)
+    S.sign_into(e, SEED2, "runner-01")        # a genuinely approved key...
+    ok, why = S.verify_with_keyset(e, ks, expect_kid="eventbridge")
+    assert not ok and "expected a signature from kid 'eventbridge'" in why
+
+    bridge = _event(type=ce.TYPE_GROUP_STARTED)
+    S.sign_into(bridge, SEED, "eventbridge")
+    assert S.verify_with_keyset(bridge, ks, expect_kid="eventbridge")[0]
+
+
+# ---- response_decision: enabled? verified? enforced? -------------------------
+
+def test_response_decision_accepts_everything_when_no_keyset_is_configured():
+    """Today's behaviour, which must survive untouched as the default."""
+    ok, why = S.response_decision(_event(), None, require=True)
+    assert ok and "not enabled" in why
+
+
+def test_response_decision_accepts_a_verified_response(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    e = _event()
+    S.sign_into(e, SEED, "runner-01")
+    assert S.response_decision(e, ks, require=True) == (True, "ok")
+
+
+def test_response_decision_rejects_an_unsigned_response_when_enforcing(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    ok, why = S.response_decision(_event(), ks, require=True)
+    assert not ok and "no ce_signature" in why
+
+
+def test_response_decision_reports_but_accepts_in_audit_mode(tmp_path):
+    """The two-flag rollout in one assertion: a keyset alone verifies and explains,
+    without yet rewriting anything a user sees."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    ok, why = S.response_decision(_event(), ks, require=False)
+    assert ok, "audit mode must not reject"
+    assert "no ce_signature" in why, "but it must still say what was wrong"
+
+
+def test_response_decision_requires_the_bridge_kid_on_group_events(tmp_path):
+    ks = keyset.load(_write(tmp_path, {"eventbridge": PUB.hex(),
+                                       "runner-01": PUB2.hex()}))
+    forged = _event(type=ce.TYPE_GROUP_COMPLETED)
+    S.sign_into(forged, SEED2, "runner-01")
+    ok, why = S.response_decision(forged, ks, require=True, bridge_kid="eventbridge")
+    assert not ok and "expected a signature from kid 'eventbridge'" in why
+
+    # A plain response from that same runner is still fine — the pin is per-class.
+    resp = _event()
+    S.sign_into(resp, SEED2, "runner-01")
+    assert S.response_decision(resp, ks, require=True, bridge_kid="eventbridge")[0]
+
+
+def test_response_decision_does_not_mutate_the_event(tmp_path):
+    """What "pure" buys: the caller owns the rewrite, so this is safe to call on the
+    hot path of a consumer loop without copying first."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    e = _event()
+    before_attrs, before_data = dict(e.attrs), dict(e.data)
+    S.response_decision(e, ks, require=True)
+    assert e.attrs == before_attrs and e.data == before_data
