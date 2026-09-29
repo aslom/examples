@@ -1,0 +1,21 @@
+# Keep the build context to source + pyproject. Anything listed here would
+# either bloat the image or invalidate layer caches on every local test run.
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.git/
+.gitignore
+Dockerfile-*
+.dockerignore
+README.md
+scripts/
+tests/
+*.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+k8s/

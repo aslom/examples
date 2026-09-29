@@ -1,0 +1,41 @@
+# Ingress for Kind, served by the ingress-nginx controller that
+# scripts/kind_setup.py installs.
+#
+# The host is `eventbridge.127.0.0.1.nip.io`: nip.io resolves any
+# `<anything>.127.0.0.1.nip.io` to 127.0.0.1, which gives a real hostname-based
+# Ingress with no /etc/hosts editing and no wildcard DNS of our own. The
+# controller is reachable on the host ports that k8s/kind/kind-cluster.yaml maps
+# (30080 -> 80), so the public URL is:
+#
+#     http://eventbridge.127.0.0.1.nip.io:30080
+#
+# Plain HTTP on purpose: the kind ingress-nginx ships a self-signed certificate,
+# and an HTTPS URL would make every `curl` and every browser tab a click-through.
+# This is a local loopback-only demo, so TLS buys nothing here — unlike the
+# cluster Route, which terminates edge TLS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eventbridge
+  labels:
+    app.kubernetes.io/name: eventbridge
+  annotations:
+    # EventBridge streams Server-Sent Events from /events.sse. nginx buffers
+    # proxied responses by default, which would hold SSE frames until the buffer
+    # filled — the stream would appear to hang. The application already sends
+    # X-Accel-Buffering: no, and this makes it explicit at the controller.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: eventbridge.127.0.0.1.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: eventbridge
+                port:
+                  name: http

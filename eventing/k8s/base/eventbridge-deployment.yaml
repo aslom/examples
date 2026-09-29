@@ -1,0 +1,93 @@
+# EventBridge — the face of the demo. Single replica BY CONSTRAINT (§8.6).
+#
+# The event store is SQLite on local disk. Two replicas means two divergent
+# databases behind one Service, and the HTML view would show different history
+# depending on which pod answered. `kafka_requests_mirror.py` also uses a
+# per-process consumer group with no commits so every start re-scans the topic —
+# sane for one pod, duplicative for many. So: replicas 1, no HPA, no
+# ScaledObject, and strategy Recreate to avoid two pods sharing a volume during a
+# rollout. This is a constraint to state, not a limitation to fix; sharing the
+# store means replacing SQLite, which is out of scope.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventbridge
+  labels:
+    app.kubernetes.io/name: eventbridge
+    app.kubernetes.io/part-of: rossoctl-eventing
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eventbridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eventbridge
+        app.kubernetes.io/part-of: rossoctl-eventing
+    spec:
+      # NOTE: no runAsUser. On OpenShift the SCC assigns one from the namespace
+      # range (1000910000/10000 here) and overrides the image's USER; setting it
+      # ourselves would fight that. The image is built so an arbitrary UID works:
+      # every writable path is group-0 owned and group-writable (§8.5).
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: eventbridge
+          image: quay.io/aslomnet/rossoctl-eventbridge:dev
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: eventing-config
+            # ntfy phone fan-out. An ntfy topic name is a CAPABILITY — anyone who
+            # knows it can both read and publish your notifications — so it is never
+            # committed. k8s_deploy.py creates this Secret from NTFY_TOPIC in your
+            # environment; `optional: true` means the overlays that do not use ntfy
+            # are unaffected when it is absent.
+            #
+            # Listed AFTER the ConfigMap deliberately: for a key present in several
+            # envFrom sources the last source wins, which is how NTFY_ENABLED=true
+            # here overrides the ConfigMap's "false".
+            - secretRef:
+                name: eventbridge-ntfy
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}

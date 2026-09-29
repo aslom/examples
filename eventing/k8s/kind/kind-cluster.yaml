@@ -1,0 +1,60 @@
+# Recommended Kind cluster for running Phase 1 locally.
+#
+# Create it with:
+#   python3 scripts/kind_setup.py --recreate
+# or by hand:
+#   kind create cluster --name kev1 --config k8s/kind/kind-cluster.yaml \
+#     --kubeconfig .kube/config-kind
+#
+# ---------------------------------------------------------------------------
+# CPU AND MEMORY
+#
+# Kind does NOT have its own resource knobs: each node is a container, and the
+# ceiling is whatever the Docker/Rancher/Colima VM has. Setting `cpu:` or
+# `memory:` in this file would do nothing. So size the VM, not the cluster:
+#
+#   check what you have:  docker info --format '{{.NCPU}} CPUs / {{.MemTotal}} bytes'
+#   inside the cluster:   kubectl get node -o jsonpath='{.items[0].status.allocatable}'
+#
+#   minimum    4 CPU /  8 GiB   Strimzi + KEDA + ingress-nginx + both workloads,
+#                               one Kafka broker, nothing else running
+#   recommended 6 CPU / 12 GiB  leaves room for a few EventRunner replicas and
+#                               real `claude` subprocesses, which are not small
+#   measured    8 CPU / 24 GiB  what this project was verified on; comfortable
+#
+# Raise them in Rancher Desktop (Preferences -> Virtual Machine), Docker Desktop
+# (Settings -> Resources), or `colima start --cpu 6 --memory 12`. A too-small VM
+# shows up as pods stuck `Pending` with insufficient cpu/memory, or an OOMKilled
+# Kafka broker — not as an error from kind.
+#
+# A single control-plane node is deliberate. The ScaledObject's maxReplicaCount of
+# 6 is bounded by the topic's partition count, not by node count, and six small
+# pods fit on one node comfortably. Extra workers would cost memory and prove
+# nothing extra here.
+# ---------------------------------------------------------------------------
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kev1
+nodes:
+  - role: control-plane
+    # ingress-nginx's kind deployment schedules its controller with a
+    # nodeSelector on ingress-ready=true and binds host ports, so BOTH of the
+    # next two blocks are required for an Ingress to be reachable. A cluster
+    # created without them cannot serve one at all, which is the main reason to
+    # use this config rather than a default `kind create cluster`.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # 30080/30443 rather than 80/443: they avoid needing privileged host ports,
+      # and they stay clear of the two ports this project already uses — 8080 for
+      # a laptop EventBridge and 18080 for the Docker e2e.
+      - containerPort: 80
+        hostPort: 30080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 30443
+        protocol: TCP

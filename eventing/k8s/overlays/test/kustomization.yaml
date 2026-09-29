@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kev1
+resources:
+  - ../../base
+patches:
+  # 5s, not KEDA's 300s default: this overlay exists for fast demo loops and for
+  # assertions about scale-BACK-to-zero, and the wait dominates both. Measured on
+  # ykt1 with cooldownPeriod 30: POST -> scale-up 1.7s, pod Ready 13.7s, back to
+  # zero 46.5s — i.e. KEDA's *detection* was never the slow part (pollingInterval is
+  # already 5s); the 30s was the pod lingering after its work finished.
+  #
+  # Safe to make this aggressive because of RQ-1: the offset is committed only after
+  # the terminal event, so lag stays >=1 for the whole run and KEDA cannot scale away
+  # a pod that is still working. The cooldown only governs how promptly an *idle* pod
+  # is removed.
+  #
+  # The cost is churn: a request arriving seconds after the previous run finishes pays
+  # a fresh pod start (~12s here, dominated by image pull and free-threaded CPython
+  # init — no KEDA setting affects that).
+  - target:
+      kind: ScaledObject
+      name: eventrunner
+    patch: |-
+      - op: replace
+        path: /spec/cooldownPeriod
+        value: 5
+# Mock mode is NOT set explicitly here, on purpose. This overlay mounts no
+# credential Secret at all, so `eventrunner/config.py` auto-detects that neither
+# ANTHROPIC_AUTH_TOKEN nor ANTHROPIC_API_KEY is set and selects mock mode itself.
+# That is just as deterministic — nothing can inject a credential into these pods —
+# and it means the e2e test exercises the auto-detection path in-cluster rather
+# than bypassing it. §14 assertion 7 asserts the `auto:` reason in the pod log for
+# exactly that reason.

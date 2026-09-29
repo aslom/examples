@@ -1,0 +1,16 @@
+[kafka]
+bootstrap      = "localhost:9092"
+request_topic  = "requests"
+response_topic = "responses"
+
+[http]
+addr    = "127.0.0.1:8080"
+workers = 8
+
+[ntfy]
+enabled  = false
+base_url = "https://ntfy.sh"
+topic    = ""
+token    = ""
+phases   = ["result", "error"]
+public_base_url = "http://127.0.0.1:8080"

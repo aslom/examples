@@ -1,0 +1,78 @@
+# The one new moving part in Phase 1. DESIGN_PHASE1.md §7.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: eventrunner
+spec:
+  scaleTargetRef:
+    name: eventrunner            # the Deployment, same namespace
+  minReplicaCount: 0             # scale to zero when idle — an idle demo is free
+  # 10 pods, under the requests topic's 12 partitions. Kafka assigns each partition to
+  # exactly one consumer in a group, so the partition count is a hard ceiling on useful
+  # pods — and KEDA enforces the same bound by default (allowIdleConsumers: false).
+  # RAISING this above 12 would require raising the topic's partitions first; the two
+  # numbers are one decision. Lowering it, as here, needs nothing: 12 partitions over
+  # 10 consumers simply means two of them own two partitions each.
+  #
+  # History: 1 in the design's interim state, capped by §16 Gap B (session transcripts
+  # lived on a pod's ephemeral layer, so a second pod could not resume what the first
+  # started). T1.7 verified resume-by-path and T1.8/T1.9 moved the transcript into
+  # EventBridge, lifting that cap to the partition count. Raised 6 -> 12 so a 100-agent
+  # group (§21) would spread over at least 10 pods; set to 10 deliberately once that
+  # was the observed working figure anyway (a 100-agent batch peaked at 10 Running).
+  #
+  # Actual concurrent agents is this times ER_MAX_CONCURRENT (4), so 10 pods run up to
+  # 40 turns at once. Fine for mock; size it deliberately before pointing a batch that
+  # wide at a real model.
+  maxReplicaCount: 10
+  pollingInterval: 5             # seconds between lag checks
+  # §7.1, "the long-run problem": KEDA scales down on lag, and lag drops when a
+  # message is COMMITTED. RQ-1 moved the commit to after the terminal event, so
+  # lag now stays >=1 for the whole run and a streaming pod cannot be scaled away.
+  # The cooldown is belt-and-braces on top of that.
+  cooldownPeriod: 300
+  # maxReplicaCount alone does NOT give fast fan-out, and this is the surprising part.
+  # KEDA scales 0 -> 1 itself, but delegates 1 -> N to an HPA it creates. Kubernetes'
+  # DEFAULT scaleUp policy adds at most max(100% of current, 4 pods) per 15s, so from
+  # one pod a burst climbs 1 -> 5 -> 10 over roughly two 15s cycles — about 30s to reach
+  # the cap. A 100-agent batch that finishes in ~60s is then half over before the
+  # capacity it asked for exists.
+  #
+  # So say it explicitly: allow the whole cap in a single step. The burst is what we are
+  # optimising for; there is no thundering-herd concern because the ceiling is already
+  # bounded by maxReplicaCount and by the partition count.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - type: Pods
+              value: 10
+              periodSeconds: 15
+        scaleDown:
+          # The default is a 300s stabilization window, which would hold 10 pods for
+          # five minutes after a batch drains. KEDA bypasses the HPA for N -> 0, so
+          # scale-to-zero is unaffected either way, but this keeps the intermediate
+          # step-down honest too.
+          stabilizationWindowSeconds: 30
+          selectPolicy: Max
+          policies:
+            - type: Pods
+              value: 10
+              periodSeconds: 15
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: my-cluster-kafka-bootstrap.kafka.svc:9092
+        # MUST match ER_CONSUMER_GROUP in the ConfigMap exactly.
+        consumerGroup: kev1-eventrunner
+        topic: kev1-requests
+        lagThreshold: "1"           # one pending request wakes a pod
+        activationLagThreshold: "0" # 0 -> 1 on any lag at all
+        # Matches the application's auto_offset_reset, so KEDA's view of "how much
+        # work is pending" agrees with what a starting consumer will read.
+        # Consequence to expect: messages already retained in the topic count as
+        # lag and trigger a scale-up on first deploy.
+        offsetResetPolicy: earliest

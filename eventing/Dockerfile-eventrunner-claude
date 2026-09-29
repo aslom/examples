@@ -1,0 +1,66 @@
+# EventRunner + the `claude` CLI. DESIGN_PHASE1.md §15, T2.4.
+#
+# The base runner image deliberately omits the CLI: it is distributed
+# per-platform, versioned independently of this project, and mock mode makes a
+# bare `docker run` useful without it. The real demo needs it, so it lives in a
+# thin derived image rather than bloating the image the e2e test uses.
+#
+#   docker build -f Dockerfile-eventrunner-claude \
+#     -t quay.io/aslomnet/rossoctl-eventrunner-claude:dev .
+#
+# or `python3 scripts/build_images.py --with-claude`.
+ARG BASE_IMAGE=quay.io/aslomnet/rossoctl-eventrunner:dev
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="rossoctl-eventrunner-claude" \
+      org.opencontainers.image.description="EventRunner with the Claude Code CLI for real agent runs"
+
+# Root only for the install; we drop back to the numeric UID at the end.
+USER 0
+
+# The CLI's native installer needs curl; node is what it runs on. Pinned to the
+# version this project verified resume-by-path against (see
+# scripts/verify_resume_by_path.py) — a floating `latest` would silently change
+# the behaviour that §16 Gap B depends on.
+# Deliberately NOT running `claude --version` here.
+#
+# The CLI ships a `bun` binary, and bun aborts under QEMU user-mode emulation:
+#
+#   qemu: uncaught target signal 6 (Aborted) - core dumped
+#
+# So a cross-built amd64 layer cannot execute it on an arm64 builder, and adding
+# the check made the build fail for a reason that has nothing to do with the image
+# being correct. We assert the binary is installed and executable, and verify it
+# actually RUNS on a real amd64 node instead — k8s_preflight.py check 13, which is
+# better evidence than a build-time check under emulation anyway.
+ARG CLAUDE_VERSION=2.1.278
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl nodejs npm; \
+    rm -rf /var/lib/apt/lists/*; \
+    npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_VERSION}"; \
+    npm cache clean --force; \
+    test -x "$(command -v claude)"; \
+    echo "claude installed at $(command -v claude)"
+
+# §16 Gap B: the demo overlay puts HOME on the mounted volume (/data/home), but
+# create it here too so a plain `docker run` of this image also works.
+ENV HOME=/data/home \
+    CLAUDE_CONFIG_DIR=/data/home/.claude
+
+# Re-apply the §8.5 permission model over everything the install touched.
+# OpenShift assigns an arbitrary UID from the namespace range and overrides the
+# image's USER, but the process ALWAYS gets gid 0 — so every writable path must be
+# group-0 owned and group-writable. `chmod g=u` copies the owner bits onto the
+# group. `chown app:app` was the original bug: an arbitrary UID is not `app`.
+RUN mkdir -p /data/home/.claude \
+ && chgrp -R 0 /data /app /home/app /data/home \
+ && chmod -R g=u /data /app /home/app /data/home
+
+# Numeric on purpose. With runAsNonRoot: true the kubelet cannot prove a *named*
+# user is non-root and fails the container with
+# CreateContainerConfigError: "image has non-numeric user (app)".
+USER 10001
+
+STOPSIGNAL SIGTERM
+CMD ["python", "-m", "eventrunner"]

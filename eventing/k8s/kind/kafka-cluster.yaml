@@ -1,0 +1,69 @@
+# A single-node KRaft Kafka for local use, shaped to match the `my-cluster` on the
+# reference OpenShift cluster so the SAME application manifests work against both:
+# the bootstrap address `my-cluster-kafka-bootstrap.kafka.svc:9092` is identical,
+# which is what lets base/configmap.yaml stay unchanged.
+#
+# Strimzi 1.x is KRaft-only, so the broker/controller count lives in a
+# KafkaNodePool rather than in the Kafka CR.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  # Ephemeral, like the reference cluster: a broker restart loses all topic data.
+  # Fine for a demo, and it keeps the local-path provisioner out of the picture.
+  storage:
+    type: ephemeral
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  jvmOptions:
+    # A 1 GiB container with Kafka's default heap sizing is a reliable OOMKill.
+    -Xms: 512m
+    -Xmx: 512m
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: my-cluster
+  namespace: kafka
+spec:
+  kafka:
+    version: 4.2.0
+    metadataVersion: 4.2-IV1
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+    config:
+      # All 1 because there is a single broker; anything higher leaves topics
+      # Ready=False forever waiting for replicas that cannot exist.
+      default.replication.factor: 1
+      min.insync.replicas: 1
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      # Locally we CAN fix what §16 Gap A has to live with on a shared cluster:
+      # scale-from-zero forms a new consumer-group generation every time, and the
+      # broker otherwise waits 3s before completing that first rebalance. Zero
+      # here makes local wake latency noticeably better than the cluster's.
+      group.initial.rebalance.delay.ms: 0
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}

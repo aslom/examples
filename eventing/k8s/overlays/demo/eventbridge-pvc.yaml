@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: eventbridge-data
+spec:
+  accessModes:
+    # ReadWriteOnce is all this cluster offers (gp2-csi/gp3-csi, EBS). That is
+    # fine here precisely because EventBridge is single-replica by constraint
+    # (§8.6) — and it is also why Gap B option 4, a shared RWX volume for
+    # ~/.claude, was not available as a fix.
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName omitted on purpose: the cluster's default (gp3-csi,
+  # WaitForFirstConsumer) is correct, and naming it would break other clusters.

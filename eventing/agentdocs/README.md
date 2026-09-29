@@ -1,0 +1,34 @@
+# agentdocs
+
+Long-form design and build records for the `eventing/` demo, kept in the repository
+rather than in someone's scratch directory so the claims in them can be checked
+against the code they describe.
+
+They are written to be read by whoever picks this up next — human or agent — and
+they are deliberately specific: measured numbers, failures with their root causes,
+and what is *not* verified.
+
+## The files
+
+| File | What it is |
+|---|---|
+| [`DESIGN_PHASE0.md`](DESIGN_PHASE0.md) | The original design: the CloudEvent wire contract, the two topics, the correlation-ID and `uuid5` session scheme, the per-correlation FIFO router, and the eight questions-and-experiments (Q&E-1..8) that settled it. |
+| [`IMPLEMENTATION_REPORT0.md`](IMPLEMENTATION_REPORT0.md) | What Phase 0 actually built against that design, with test results, the deltas from the plan, and the follow-ups it left behind. |
+| [`README_PHASE0.md`](README_PHASE0.md) | The Phase 0 runbook: how to stand up a local Kafka, run both services on a laptop, and drive a turn end to end. |
+| [`DESIGN_PHASE1.md`](DESIGN_PHASE1.md) | The Phase 1 design — a delta over Phase 0, not a replacement: KEDA scaling on consumer lag, scale-to-zero, the three cluster findings that shaped it, the §16 gaps (A: rebalance floor, B: ephemeral session state, C: idle replay), §3.2 on supporting a local Kind cluster, and §21 designing agent **groups** — batch fan-out with a tracked fan-in, its own page and exactly two notifications. |
+| [`IMPLEMENTATION_REPORT1.md`](IMPLEMENTATION_REPORT1.md) | What Phase 1 built, the measured results on both clusters, 28 findings including two real bugs only a scale-to-zero deployment could expose, and an honest account of what is still blocked and why. |
+| [`README_PHASE1.md`](README_PHASE1.md) | The Phase 1 runbook in full detail, covering all four ways to run it: locally without containers, under Docker, on a Kind cluster, and on OpenShift. |
+
+## Reading order
+
+- **Running it?** [`README_PHASE1.md`](README_PHASE1.md), or the [Phase 1
+  section](../README.md#phase-1--kubernetes-and-keda) of the component README for
+  the short version.
+- **Changing it?** [`DESIGN_PHASE0.md`](DESIGN_PHASE0.md) for the wire contract that
+  must not change, then [`DESIGN_PHASE1.md`](DESIGN_PHASE1.md) for the deployment
+  model.
+- **Debugging something odd?** [`IMPLEMENTATION_REPORT1.md`](IMPLEMENTATION_REPORT1.md)
+  §4 — most surprises are already recorded there with their cause.
+
+The `PHASE0` documents describe a laptop demo and remain accurate for that; where
+Phase 1 supersedes them it says so explicitly rather than editing them in place.

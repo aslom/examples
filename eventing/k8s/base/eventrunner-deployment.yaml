@@ -1,0 +1,75 @@
+# EventRunner — the agent executor. KEDA owns how many of these exist.
+#
+# CRITICAL: this manifest declares NO spec.replicas. Two reasons, and the second
+# is easy to overlook:
+#
+#  1. KEDA owns that field. Pinning it here would fight the ScaledObject.
+#  2. It is what makes §14.1 change detection usable. `kubectl diff -k` is the
+#     authoritative "has anything changed?" signal, and if the manifest declares
+#     replicas: 1 then the moment KEDA scales to 0 or 2 the diff reports a
+#     difference FOREVER — so "do I need to redeploy?" answers yes on every run.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventrunner
+  labels:
+    app.kubernetes.io/name: eventrunner
+    app.kubernetes.io/part-of: rossoctl-eventing
+spec:
+  # no replicas: see above
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eventrunner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eventrunner
+        app.kubernetes.io/part-of: rossoctl-eventing
+    spec:
+      # §8.3 / RQ-2: SIGTERM waits for in-flight `claude` runs to finish. This
+      # must exceed the longest expected run or the kubelet SIGKILLs mid-drain
+      # and the politeness is wasted. ER_DRAIN_TIMEOUT_S (570) sits just under it.
+      terminationGracePeriodSeconds: 600
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: eventrunner
+          image: quay.io/aslomnet/rossoctl-eventrunner:dev
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: eventing-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # §8.4 — the failure this catches is a LIVE process with a DEAD thread.
+          # If the Kafka consumer thread raises, the main thread keeps running, so
+          # the pod stays Running and reports healthy while consuming nothing. A
+          # process check cannot see that and EventRunner has no HTTP server, so
+          # the consumer loop touches a heartbeat file every poll and this probe
+          # asserts its mtime is recent.
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "eventrunner.healthcheck"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # Placeholders until a real run produces numbers (§18). A `claude`
+              # subprocess plus the free-threaded interpreter is the shape here.
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: data
+          emptyDir: {}

@@ -1,0 +1,39 @@
+# Vanilla-Kubernetes alternative to base/eventbridge-route.yaml.
+#
+# k8s_preflight.py check 8 reports which of the two the cluster can serve. On
+# OpenShift use the Route (it needs no class name and no TLS secret); on a cluster
+# with only an ingress controller, drop the Route from base/kustomization.yaml and
+# add this instead:
+#
+#   resources:
+#     - ../../base
+#     - ../ingress-example.yaml
+#   patches:
+#     - patch: |-
+#         $patch: delete
+#         apiVersion: route.openshift.io/v1
+#         kind: Route
+#         metadata:
+#           name: eventbridge
+#
+# Set `host` to something your ingress controller and DNS actually serve, then set
+# EVENT_BRIDGE_PUBLIC_BASE_URL to the same value (k8s_deploy.py --public-url).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eventbridge
+  labels:
+    app.kubernetes.io/name: eventbridge
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: eventbridge.example.invalid
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: eventbridge
+                port:
+                  name: http

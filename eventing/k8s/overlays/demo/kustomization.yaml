@@ -1,0 +1,61 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kev1
+resources:
+  - ../../base
+  - eventbridge-pvc.yaml
+
+# ---------------------------------------------------------------------------
+# NO CREDENTIALS ARE COMMITTED IN THIS REPOSITORY.
+#
+# This overlay REFERENCES a Secret named `anthropic-credentials` but never
+# contains it. The Secret is created at deploy time from your environment by
+# `k8s_deploy.py --overlay demo`, which reads:
+#
+#     export ANTHROPIC_AUTH_TOKEN=...          # required
+#     export ANTHROPIC_BASE_URL=https://...    # optional: a LiteLLM/proxy endpoint
+#     export ANTHROPIC_MODEL=...               # optional: override the model
+#
+# and applies them via stdin — deliberately NOT
+# `kubectl create secret --from-literal=`, which would put the token in the
+# process argv where `ps` can read it.
+#
+# Nothing here uses a kustomize secretGenerator either: that reads a local file
+# or literal into the rendered manifest, so `kubectl kustomize` output (which the
+# §14.1 manifest digest hashes and which people paste into terminals) would carry
+# the credential.
+# ---------------------------------------------------------------------------
+
+# cooldownPeriod stays at the base's 300s here. A real agent conversation usually
+# continues, and a warm pod skips the ~12s cold start on every /continue. For a
+# snappy live demo of the zero -> wake -> zero loop, drop it:
+#
+#   - target: {kind: ScaledObject, name: eventrunner}
+#     patch: |-
+#       - op: replace
+#         path: /spec/cooldownPeriod
+#         value: 5
+#
+# It is safe (RQ-1 keeps lag >=1 while a run is in flight); it just means every turn
+# after an idle gap pays a fresh pod start.
+
+patches:
+  - target:
+      kind: Deployment
+      name: eventrunner
+    path: eventrunner-demo-patch.yaml
+  # A JSON 6902 patch, not a strategic merge: `volumes` is keyed by name, so
+  # merging a persistentVolumeClaim onto the base's `data` volume would leave its
+  # emptyDir in place as well, and the API server rejects a volume with two types
+  # ("may not specify more than 1 volume type"). Replacing the element outright
+  # is the only correct form.
+  - target:
+      kind: Deployment
+      name: eventbridge
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0
+        value:
+          name: data
+          persistentVolumeClaim:
+            claimName: eventbridge-data
