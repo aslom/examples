@@ -129,12 +129,25 @@ def resolve(environ: dict[str, Any], cfg, *, cache=None,
     Collapsing those into one answer would tell an operator less, and would tell
     a user debugging their own access much less.
 
-    Two mechanisms, checked in order:
+    GitHub sign-in is active when a client id **or** an approved-user list is set
+    — deliberately an `or`, so a half-configured deployment fails closed rather
+    than silently falling back to no authentication. The two halves behave
+    differently, and it is worth knowing which mistake you have made:
 
-    1. **GitHub sign-in**, when a client id and an approved-user list are
-       configured. The real path.
-    2. **Static tokens** (`EB_AUTH_TOKENS`), as a fallback. Tests must not reach
-       the network, and an offline demo has to stay possible, so this stays.
+    * **client id only** — every request gets `403`, because the approved list is
+      empty and an empty list approves nobody.
+    * **approved list only** — any GitHub token from an approved login is
+      accepted, with no OAuth App involved. Useful for a quick test with a
+      personal access token; not what you want in a deployment.
+
+    Within that, checked in order:
+
+    1. **Static tokens** (`EB_AUTH_TOKENS`) — a local constant-time compare, and
+       the break-glass path when GitHub is unreachable, so it goes first.
+    2. **GitHub sign-in** — the real path.
+
+    Static tokens also keep tests off the network and an offline demo possible,
+    which is why they are not removed now that sign-in exists.
 
     With neither configured the result is all-`None` — allowed and
     anonymous, which is what keeps the default demo working out of the box.
@@ -154,15 +167,23 @@ def resolve(environ: dict[str, Any], cfg, *, cache=None,
             # and GitHub could not vouch for it.
             return None, None, 401, why
 
+        # Static tokens first, because they are the break-glass path and this is a
+        # local constant-time compare. Checking GitHub first made the fallback
+        # slowest exactly when it is needed: during an outage every break-glass
+        # request paid a full `fetch_login` timeout on a call that could never
+        # succeed, against the same API budget the cache exists to protect.
+        #
+        # Nothing is shadowed by the order. A GitHub token is `gho_`/`ghp_`-shaped
+        # and an operator choosing a static secret that collides with a live
+        # GitHub token would have to do so deliberately.
+        if cfg.auth_tokens:
+            name, _ = resolve_identity(environ, cfg.auth_tokens)
+            if name:
+                return name, None, None, None
+
         login, err = ghauth.resolve(
             presented, cache, **({"fetch": fetch} if fetch else {}))
         if login is None:
-            # A static token is checked before giving up, so an operator can keep
-            # a break-glass credential alongside GitHub sign-in.
-            if cfg.auth_tokens:
-                name, _ = resolve_identity(environ, cfg.auth_tokens)
-                if name:
-                    return name, None, None, None
             return None, None, 401, err or "could not identify this token"
 
         if not ghauth.is_allowed(login, cfg.allowed_users):

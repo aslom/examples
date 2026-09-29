@@ -111,11 +111,49 @@ def test_resolve_uses_the_cache_and_does_not_refetch():
 
 
 def test_resolve_does_not_cache_a_failure():
-    """A revoked token must stop working promptly, and a GitHub outage must not
-    pin a legitimate user to a failure for the whole TTL."""
+    """So a GitHub outage cannot pin a legitimate user to a failure for the whole
+    TTL — each request retries rather than replaying a cached refusal.
+
+    Note this does NOT speed up revocation: see
+    `test_a_revoked_token_keeps_working_until_its_positive_entry_expires`."""
     c = ghauth.LoginCache(300.0)
     ghauth.resolve("tok", c, fetch=lambda t: (None, "GitHub rejected this token"))
     assert len(c) == 0
+
+
+def test_a_revoked_token_keeps_working_until_its_positive_entry_expires():
+    """The revocation window is the POSITIVE TTL, and it is worth pinning.
+
+    A cache hit short-circuits `resolve()` before `fetch_login` runs, so a token
+    revoked on GitHub keeps authenticating until its entry expires. Not caching
+    failures does nothing for this — that only stops an outage pinning a
+    legitimate user to a refusal.
+
+    Bounded and configurable, and 300 s is a defensible trade against the
+    5000/hour budget. But it is a real window, and a design doc claiming
+    otherwise is worse than one that states it.
+    """
+    clock = FakeClock()
+    cache = ghauth.LoginCache(300.0, now=clock)
+    assert ghauth.resolve("tok", cache, fetch=lambda t: ("alice", None)) == ("alice", None)
+
+    revoked = lambda t: (None, "GitHub rejected this token")  # noqa: E731
+    assert ghauth.resolve("tok", cache, fetch=revoked)[0] == "alice", "cache hit"
+    clock.advance(299)
+    assert ghauth.resolve("tok", cache, fetch=revoked)[0] == "alice", "still inside the TTL"
+    clock.advance(2)
+    assert ghauth.resolve("tok", cache, fetch=revoked)[0] is None, "TTL expired -> refused"
+
+
+def test_a_shorter_ttl_shortens_the_revocation_window():
+    """The knob that actually controls it, so `EB_GITHUB_CACHE_TTL_S` is not
+    mistaken for a pure performance setting."""
+    clock = FakeClock()
+    cache = ghauth.LoginCache(5.0, now=clock)
+    ghauth.resolve("tok", cache, fetch=lambda t: ("alice", None))
+    clock.advance(6)
+    assert ghauth.resolve("tok", cache,
+                          fetch=lambda t: (None, "GitHub rejected this token"))[0] is None
 
 
 def test_resolve_works_without_a_cache():
@@ -338,6 +376,33 @@ def test_resolve_is_case_insensitive_about_the_approved_login():
     ident, _, status, _ = auth.resolve(
         _env("gho_x"), cfg, fetch=lambda t: ("MrSabath", None))
     assert status is None and ident == "MrSabath"
+
+
+def test_break_glass_does_not_pay_a_doomed_github_call():
+    """Static tokens are checked BEFORE GitHub, so the fallback is fastest exactly
+    when it is needed. The previous order meant every break-glass request during
+    an outage paid a full fetch_login timeout on a call that could never succeed,
+    against the same API budget the cache exists to protect."""
+    calls = []
+
+    def fetch(token):
+        calls.append(token)
+        return None, "cannot reach GitHub: OSError"
+
+    cfg = _cfg(github_client_id="cid", allowed_users=frozenset({"alice"}),
+               auth_tokens={"emergency": "operator"})
+    ident, iss, status, _ = auth.resolve(_env("emergency"), cfg, fetch=fetch)
+    assert (ident, iss, status) == ("operator", None, None)
+    assert calls == [], "a static token must not trigger a GitHub lookup"
+
+
+def test_a_github_token_is_unaffected_by_the_static_first_order():
+    """The reorder must not shadow real sign-in."""
+    cfg = _cfg(github_client_id="cid", allowed_users=frozenset({"mrsabath"}),
+               auth_tokens={"emergency": "operator"})
+    ident, iss, status, _ = auth.resolve(
+        _env("gho_real"), cfg, fetch=lambda t: ("mrsabath", None))
+    assert (ident, iss, status) == ("mrsabath", "github", None)
 
 
 def test_a_static_token_still_works_as_a_break_glass_credential():

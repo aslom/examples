@@ -171,9 +171,15 @@ class LoginCache:
     hourly API calls, and adds GitHub's latency to the request path. Entries are
     keyed by hash so the cache cannot be read back into a working credential.
 
-    Negative results are not cached. A revoked token must stop working promptly,
-    and a GitHub outage must not pin a legitimate user to a failure for the whole
-    TTL.
+    Negative results are not cached, so a GitHub outage cannot pin a legitimate
+    user to a failure for the whole TTL — each request retries.
+
+    That does **not** speed up revocation. A revoked token keeps working until its
+    positive entry expires, because a cache hit short-circuits `resolve()` before
+    `fetch_login` is ever called: the window is the full TTL, 300 s by default.
+    Bounded and configurable via `EB_GITHUB_CACHE_TTL_S`, and 300 s is a
+    defensible trade against spending the 5000/hour API budget — but it is a real
+    window, not an absence of one. Lower the TTL if that matters more than calls.
     """
 
     def __init__(self, ttl_s: float = 300.0, now=time.monotonic) -> None:

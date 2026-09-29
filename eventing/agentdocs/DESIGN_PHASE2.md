@@ -1,6 +1,6 @@
 # DESIGN — Phase 2: identity on the event path
 
-Status: draft (revision 1)
+Status: draft (revision 2)
 Scope: **delta over `DESIGN_PHASE1.md`.** Read that first. This document records
 only what changes when the demo stops trusting whoever can reach it.
 
@@ -109,9 +109,20 @@ The hash is not decoration. A cache keyed by the raw token means a memory dump,
 a careless `repr`, or a debug log yields a working credential. Keyed by hash, it
 yields nothing.
 
-**Failures are not cached.** Two reasons, and they pull the same way: a revoked
-token must stop working promptly, and a GitHub outage must not pin a legitimate
-user to a failure for the whole TTL.
+**Failures are not cached**, so a GitHub outage cannot pin a legitimate user to a
+refusal for the whole TTL — each request retries.
+
+**It does not speed up revocation**, and an earlier revision of this document
+claimed it did. A cache hit short-circuits `resolve()` before `fetch_login` runs,
+so a token revoked on GitHub keeps authenticating until its *positive* entry
+expires. Measured with an injected clock: still accepted at t+299 s, refused at
+t+300 s. The window is the full TTL.
+
+That is bounded, configurable via `EB_GITHUB_CACHE_TTL_S`, and 300 s is a
+defensible trade against a 5000/hour budget — but it is a real window, and
+`test_a_revoked_token_keeps_working_until_its_positive_entry_expires` now pins it
+so the claim cannot drift again. Lower the TTL if prompt revocation matters more
+than API calls.
 
 ### 2.4 `401` and `403` are different answers
 
@@ -145,8 +156,12 @@ broken deployment rather than a policy.
 - **An offline demo has to stay possible.** Conference wifi is not a dependency
   worth accepting.
 - **A break-glass credential.** When GitHub is unreachable, an operator with a
-  static token can still drive the system. `resolve()` checks it before giving
-  up for exactly this reason.
+  static token can still drive the system. `resolve()` checks the static map
+  **before** GitHub, precisely so the fallback is fastest when it is needed: the
+  reverse order made every break-glass request pay a full `fetch_login` timeout
+  on a call that could never succeed, against the budget §2.3 says the cache
+  exists to protect. Nothing is shadowed — a static secret would have to
+  deliberately collide with a live `gho_`-shaped token.
 
 ### 2.6 Identity on the event, and what it is worth
 
