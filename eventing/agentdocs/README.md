@@ -18,6 +18,7 @@ and what is *not* verified.
 | [`DESIGN_PHASE1.md`](DESIGN_PHASE1.md) | The Phase 1 design — a delta over Phase 0, not a replacement: KEDA scaling on consumer lag, scale-to-zero, the three cluster findings that shaped it, the §16 gaps (A: rebalance floor, B: ephemeral session state, C: idle replay), §3.2 on supporting a local Kind cluster, and §21 designing agent **groups** — batch fan-out with a tracked fan-in, its own page and exactly two notifications. |
 | [`IMPLEMENTATION_REPORT1.md`](IMPLEMENTATION_REPORT1.md) | What Phase 1 built, the measured results on both clusters, 28 findings including two real bugs only a scale-to-zero deployment could expose, and an honest account of what is still blocked and why. |
 | [`README_PHASE1.md`](README_PHASE1.md) | The Phase 1 runbook in full detail, covering all four ways to run it: locally without containers, under Docker, on a Kind cluster, and on OpenShift. |
+| [`DESIGN_PHASE2.md`](DESIGN_PHASE2.md) | The Phase 2 design — identity on the event path. Why GitHub's opaque user token rules out local verification and forces a `GET /user` lookup plus a load-bearing cache; why `401` and `403` are kept distinct; what `ce_submitter` is and is not worth while it remains unsigned; the `kid` and approved-key-set groundwork for proving *which agent* answered, and the blocker that nothing signs yet. |
 
 ## Reading order
 
@@ -27,8 +28,12 @@ and what is *not* verified.
 - **Changing it?** [`DESIGN_PHASE0.md`](DESIGN_PHASE0.md) for the wire contract that
   must not change, then [`DESIGN_PHASE1.md`](DESIGN_PHASE1.md) for the deployment
   model.
+- **Working on auth or identity?** [`DESIGN_PHASE2.md`](DESIGN_PHASE2.md) §2.1 first:
+  the opaque-token constraint is what rules out the design most people reach for.
 - **Debugging something odd?** [`IMPLEMENTATION_REPORT1.md`](IMPLEMENTATION_REPORT1.md)
   §4 — most surprises are already recorded there with their cause.
+- **Presenting it?** [`DESIGN_PHASE2.md`](DESIGN_PHASE2.md) §2.6 and §3, for what the
+  identity controls do *not* prove.
 
 The `PHASE0` documents describe a laptop demo and remain accurate for that; where
 Phase 1 supersedes them it says so explicitly rather than editing them in place.
