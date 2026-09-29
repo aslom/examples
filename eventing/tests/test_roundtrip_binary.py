@@ -1,5 +1,6 @@
 """Wire contract: CloudEvent binary-mode round-trip through headers+value."""
 import json
+import re
 import uuid
 
 from shared import ce
@@ -78,3 +79,32 @@ def test_empty_value_decodes_to_none_data():
     assert value == b""
     evt2 = ce.from_kafka_binary(headers, value)
     assert evt2.data is None
+
+
+def test_every_extension_attribute_name_is_cloudevents_compliant():
+    """CloudEvents v1.0: attribute names MUST be lower-case [a-z0-9] only.
+
+    No underscore, hyphen, dot or upper case. The spec restricts the set because
+    an event traverses several hops and some protocols treat metadata as
+    case-sensitive while others do not.
+
+    This codec cannot catch a violation on its own: `to_kafka_binary` and
+    `from_kafka_binary` only add and strip the `ce_` prefix, so a bad name
+    round-trips happily here and is rejected — or silently dropped — by a
+    spec-compliant SDK, an HTTP-binding gateway or a Knative broker further
+    along. `submitter_iss` shipped in review for exactly that reason. Hence a
+    test rather than a comment.
+    """
+    ext_names = [v for k, v in vars(ce).items()
+                 if k.startswith("EXT_") and isinstance(v, str)]
+    assert ext_names, "no EXT_* constants found — has ce.py been restructured?"
+    bad = [n for n in ext_names if not re.fullmatch(r"[a-z][a-z0-9]*", n)]
+    assert not bad, f"not CloudEvents-compliant attribute names: {bad}"
+
+
+def test_extension_names_are_terse_enough_to_survive_a_gateway():
+    """The spec SHOULD-limit is 20 characters. Not a hard failure upstream, but
+    a name over it is a smell worth catching while renaming is still free."""
+    long = [v for k, v in vars(ce).items()
+            if k.startswith("EXT_") and isinstance(v, str) and len(v) > 20]
+    assert not long, f"extension names over the 20-char SHOULD limit: {long}"

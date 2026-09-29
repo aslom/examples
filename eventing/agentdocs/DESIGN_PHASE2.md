@@ -18,7 +18,7 @@ many of them there are. Phase 2 answers two questions neither phase asked:
                 ║ 🔒 EventBridge     ║  401 no credential
                 ║    the PEP        ║  403 known, not approved
                 ╚═════════╤═════════╝
-                          │ ce_submitter, ce_submitter_iss
+                          │ ce_submitter, ce_submitteriss
                           ▼
                    Kafka:requests ─▶ EventRunner ─▶ Kafka:responses
 ```
@@ -37,7 +37,7 @@ Stated explicitly, because the temptation in a security document is to redesign
 things that already work:
 
 - **The CloudEvent contract** (Phase 0 §2). Two new extension attributes are
-  *added* (`submitter`, `submitter_iss`); nothing existing changes shape.
+  *added* (`submitter`, `submitteriss`); nothing existing changes shape.
   `ce.new_event(**attrs)` already accepts arbitrary attributes and
   `to_kafka_binary` already emits every non-empty one as a `ce_*` header, so the
   codec needed no change at all.
@@ -153,13 +153,23 @@ broken deployment rather than a policy.
 Two attributes ride the request:
 
 ```text
-ce_submitter:     mrsabath
-ce_submitter_iss: github
+ce_submitter:    mrsabath
+ce_submitteriss: github
 ```
 
-`submitter_iss` exists because without it a reader cannot tell a verified GitHub
+`submitteriss` exists because without it a reader cannot tell a verified GitHub
 login from a name an operator typed into an environment variable. Absent issuer
 means "static token" — the weaker claim, visible as such.
+
+**On the spelling.** CloudEvents v1.0 requires attribute names to be lower-case
+`[a-z0-9]` only — no underscore, hyphen or upper case — because an event crosses
+several hops and protocols disagree about metadata case-sensitivity. This first
+shipped as `submitter_iss` and was caught in review, not by the code: the codec
+here only adds and strips the `ce_` prefix, so a non-compliant name round-trips
+locally and is rejected or silently dropped by a spec-compliant SDK, an
+HTTP-binding gateway or a Knative broker further along. `test_roundtrip_binary.py`
+now asserts the rule over every `EXT_*` constant, so the next extension cannot
+repeat it.
 
 **Both are unsigned.** Anything with write access to the `requests` topic can
 forge them, and the broker is plaintext. The honest claim after this phase is:
@@ -286,7 +296,7 @@ from.
    kills the consumer thread — the verification path must degrade, never raise.
    And group events are published by EventBridge itself, carry `groupid` but no
    `correlationid`, so they need either their own `kid` or a skip.
-4. Then add `submitter`, `submitter_iss` and the missing `groupid` to
+4. Then add `submitter`, `submitteriss` and the missing `groupid` to
    `SIGNED_ATTRS`. `DESIGN_PHASE1.md` §21.9.9 requires `groupid`; its absence
    means signatures currently say nothing about batch membership.
 
@@ -328,7 +338,7 @@ Verified end to end against a real GitHub account, not only in unit tests:
 | Unknown token | `401` |
 | Real user, not on the list | `403` — `mrsabath is not on the approved-user list` |
 | Approved user | `202`, agent ran, `final=True` |
-| On the wire | `ce_submitter:mrsabath`, `ce_submitter_iss:github` |
+| On the wire | `ce_submitter:mrsabath`, `ce_submitteriss:github` |
 | Group of 5 | every member carried both attributes |
 
 ### 6.1 One environment finding worth recording

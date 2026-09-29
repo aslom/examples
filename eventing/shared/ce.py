@@ -49,7 +49,13 @@ EXT_SUBMITTER     = "submitter"
 # Who vouched for EXT_SUBMITTER: "github" when the login came from a verified
 # GitHub sign-in, absent when it came from a static token. Without this a reader
 # cannot tell a real identity from a name an operator typed into an env var.
-EXT_SUBMITTER_ISS = "submitter_iss"
+#
+# Spelled without a separator because CloudEvents v1.0 requires attribute names
+# to be lower-case [a-z0-9] only — no underscore. This codec would not have
+# caught `submitter_iss`: to_kafka_binary/from_kafka_binary just add and strip the
+# `ce_` prefix and validate nothing, so it round-trips here and is rejected or
+# silently dropped by a spec-compliant consumer a hop later.
+EXT_SUBMITTER_ISS = "submitteriss"
 
 CE_HEADER_PREFIX = "ce_"
 CORE_ATTRS = {"specversion", "type", "source", "id", "time",

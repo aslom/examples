@@ -539,9 +539,16 @@ def cmd_login(args):
         raise SystemExit(1) from None
 
     dest = _token_path()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(token)
-    dest.chmod(0o600)          # a token is a credential; not world-readable
+    # 0o700 on the directory and 0o600 at creation, rather than writing first and
+    # tightening after: `write_text` creates at the process umask, which leaves a
+    # window — however short — where a credential is group- and world-readable.
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    # os.open applies its mode only when it CREATES the file, so a re-login over
+    # a file left loose by an earlier version would keep the old permissions.
+    dest.chmod(0o600)
     print(f"✔ signed in as {login}")
     print(f"  token stored at {dest} (mode 600)")
 

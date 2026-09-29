@@ -147,12 +147,12 @@ def resolve(environ: dict[str, Any], cfg, *, cache=None,
     if github_on:
         presented, why = _bearer(environ)
         if why:
-            # Fall back to a static token only when one could match; otherwise a
-            # missing header is simply unauthenticated.
-            if not cfg.auth_tokens:
-                return None, None, 401, why
-            name, why2 = resolve_identity(environ, cfg.auth_tokens)
-            return (name, None, None, None) if name else (None, None, 401, why2)
+            # No usable credential at all. Falling back to a static token here
+            # would be dead code: `resolve_identity` re-reads the same header via
+            # `_bearer` and fails for the same reason. The break-glass path is the
+            # branch below, which is the case that matters — a token WAS presented
+            # and GitHub could not vouch for it.
+            return None, None, 401, why
 
         login, err = ghauth.resolve(
             presented, cache, **({"fetch": fetch} if fetch else {}))
