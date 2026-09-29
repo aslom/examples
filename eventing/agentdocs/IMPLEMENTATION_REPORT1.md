@@ -824,7 +824,7 @@ That is RQ-1 behaving exactly as designed, observed by accident.
 ## 9. Signing: the cost of the pure-Python rule
 
 §1.1 bans C extensions, which rules out `cryptography`, so Ed25519 is implemented
-from RFC 8032 in `eventrunner/signing.py` (~120 lines) and checked against the
+from RFC 8032 in `shared/signing.py` (~120 lines) and checked against the
 RFC's own test vectors — all three pass for key derivation, signing and
 verification, plus tamper, wrong-key, malformed-input and `alg` confusion cases.
 

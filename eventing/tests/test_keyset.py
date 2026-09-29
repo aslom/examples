@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from eventrunner import signing as S
 from shared import ce, keyset
+from shared import signing as S
 
 # RFC 8032 test vector 1 — the same seed the signing tests use.
 SEED = binascii.unhexlify(

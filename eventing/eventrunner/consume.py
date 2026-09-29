@@ -271,7 +271,7 @@ class Consumer(threading.Thread):
             return
 
         if self._cfg.require_signature:
-            from eventrunner import signing
+            from shared import signing
             ok, why = signing.verify_event(evt, self._cfg)
             if not ok:
                 _elog(f"rejecting unsigned/badly-signed request corr={corr}: {why} "

@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from eventrunner import signing as S
 from shared import ce
+from shared import signing as S
 
 # ---- RFC 8032 §7.1 test vectors --------------------------------------------
 
