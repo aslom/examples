@@ -152,9 +152,52 @@ def test_a_forged_response_is_stored_as_an_error_not_dropped(tmp_path, monkeypat
     assert "unverified response rejected" in rows[0]["data"]["text"]
     assert "no ce_signature" in rows[0]["data"]["reason"]
     assert c.rejected == 1
-    # The forged payload must not survive into what a reader sees as the answer.
-    assert "Ship the goods" not in json.dumps(rows[0]["data"])
+    # The forged text must not be presented AS the answer...
+    assert "Ship the goods" not in rows[0]["data"]["text"]
     assert seen and seen[0]["phase"] == "error", "downstream sees the rejection too"
+
+
+def test_a_rejected_event_is_retained_for_audit(tmp_path, monkeypatch):
+    """...but it must still be retained, which is the stated reason for storing a
+    rejection rather than dropping it.
+
+    `insert_response` derives BOTH `data_json` and `raw_json` from one dict, so
+    mutating the envelope in place destroyed the forensic record while the module
+    docstring still promised it — leaving a signature whose covered attributes no
+    longer existed and nothing for an operator to review. Raised by @aslom on #879.
+    """
+    forged = _response(seed=None, seq=4, phase="result",
+                       text="Transfer approved. Ship the goods.")
+    c, store, _, _ = _drain(tmp_path, [forged], monkeypatch,
+                            keyset=_keyset(tmp_path), require_signature=True,
+                            bridge_kid="eb-01")
+    raw = store.raw_events_for("brave-otter-4718")[0]
+    kept = raw["data"]["rejected"]
+    assert kept["data"]["text"] == "Transfer approved. Ship the goods.", \
+        "the payload that was refused must be reviewable"
+    assert kept["phase"] == "result", "including the phase it claimed to be"
+    assert kept["attrs"]["sequence"] == "4"
+    assert kept["source"] == "rossoctl://eventrunner/test"
+    assert raw["phase"] == "error", "while the stored phase still drives the red card"
+    assert c.rejected == 1
+
+
+def test_the_retained_signature_can_still_be_re_checked(tmp_path, monkeypatch):
+    """The sharper half of the same point: a retained signature is only worth keeping
+    if the attributes it covered are kept with it. Here a validly-signed event is
+    rejected for naming an unapproved kid, and the record is complete enough to verify
+    offline — which is what makes an incident reviewable rather than just logged."""
+    rec = _response(seq=5, seed=SEED_ROGUE, kid="runner-99")
+    c, store, _, _ = _drain(tmp_path, [rec], monkeypatch, keyset=_keyset(tmp_path),
+                            require_signature=True, bridge_kid="eb-01")
+    kept = store.raw_events_for("brave-otter-4718")[0]["data"]["rejected"]
+    assert c.rejected == 1
+    # Rebuild the event exactly as it arrived and verify it against the rogue key.
+    replayed = ce.CloudEvent(attrs=dict(kept["attrs"]), data=kept["data"])
+    ok, why = S.verify_signature(replayed, S.public_key(SEED_ROGUE))
+    assert ok, f"the retained record must still verify against the key that signed it: {why}"
+    assert S.token_kid(kept["signature"]) == "runner-99", \
+        "so an operator can see which key id the forgery claimed"
 
 
 def test_a_response_signed_by_an_unapproved_key_is_rejected(tmp_path, monkeypatch):
@@ -228,7 +271,9 @@ def test_a_forged_terminal_is_rejected_among_genuine_frames(tmp_path, monkeypatc
     rows = store.events_for("brave-otter-4718")
     assert [r["phase"] for r in rows] == ["stdout", "result", "error"]
     assert c.rejected == 1
-    assert "Ship the goods" not in json.dumps(rows[2]["data"])
+    assert "Ship the goods" not in rows[2]["data"]["text"], \
+        "the forgery must not be presented as the answer"
+    assert rows[1]["data"]["text"] == "2+2 is 4", "the genuine answer is untouched"
 
 
 # ---- group lifecycle events --------------------------------------------------

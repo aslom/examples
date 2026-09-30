@@ -22,6 +22,11 @@ class Producer:
     here rather than discovered later, and a thread pool would not fix it (the GIL
     serialises pure-Python signing anyway). If signing ever becomes mandatory at
     scale, the fix is the `cryptography` dependency conversation, not concurrency.
+
+    The number an operator actually hits: ~200 members is ~40 s, past a common 30 s
+    client timeout. `POST /v0/groups` honours an `Idempotency-Key` header, so the
+    retry after such a timeout returns the original batch instead of launching a
+    second one — the failure is survivable, but only if the caller sends the header.
     """
 
     def __init__(self, bootstrap: str, request_topic: str, source_uri: str,

@@ -6,9 +6,16 @@ transcript and pushed to the operator's phone **as a legitimate agent answer**.
 
 A rejected event is stored as `phase="error"` rather than dropped. That is deliberate:
 dropping it silently is indistinguishable from an agent that never answered, while
-`phase="error"` reuses machinery already wired — a red card in the HTML transcript, an
-ntfy priority-5 alert, and `raw_json` retained for audit — so the forgery attempt is
-visible and reviewable instead of invisible.
+`phase="error"` reuses machinery already wired — a red card in the HTML transcript and
+an ntfy priority-5 alert — so the forgery attempt is visible instead of invisible.
+
+**What "reviewable" requires.** `Store.insert_response` derives both `data_json` and
+`raw_json` from the single dict it is handed, so rewriting the envelope in place would
+overwrite the evidence with the notice about it: the refused payload, the phase it
+claimed, and the attributes the signature covered would all be gone, leaving a
+signature that can no longer be checked against anything. The original is therefore
+preserved under `data["rejected"]` — attrs, payload, claimed source and signature — so
+an incident can be verified offline rather than merely logged.
 """
 from __future__ import annotations
 
@@ -105,9 +112,24 @@ class Consumer(threading.Thread):
                         # "(error, see raw)". str() because insert_response json.dumps
                         # this dict outside any try — a non-serialisable reason would
                         # kill the thread by a second route.
-                        d["phase"] = "error"
-                        d["data"] = {"text": f"unverified response rejected: {why}",
-                                     "signature_rejected": True, "reason": str(why)}
+                        #
+                        # `rejected` carries the event as it actually arrived.
+                        # `insert_response` derives BOTH data_json and raw_json from
+                        # this one dict, so overwriting `phase`/`data` in place would
+                        # destroy the forensic record while the docstring above still
+                        # promised it — leaving a signature whose covered attributes no
+                        # longer exist, and nothing for an operator to review.
+                        d = dict(d, phase="error", data={
+                            "text": f"unverified response rejected: {why}",
+                            "signature_rejected": True,
+                            "reason": str(why),
+                            "rejected": {"phase": evt.get("phase"),
+                                         "final": evt.get("final"),
+                                         "source": evt.get("source"),
+                                         "signature": evt.get("signature"),
+                                         "attrs": dict(evt.attrs),
+                                         "data": evt.data},
+                        })
                     # §21.2: route on type. A group lifecycle event carries `groupid`
                     # but no `correlationid`, so handing it to insert_response would
                     # violate that table's (correlationid, sequence) primary key.
