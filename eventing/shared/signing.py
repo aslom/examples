@@ -456,18 +456,21 @@ def verify_event(event, cfg) -> tuple[bool, str]:
         # with a whitespace edge byte is not truncated out of the 32-byte path.
         data = pathlib.Path(key_path).read_bytes()
         seed_or_pub = data if len(data) == 32 else data.strip()
-        pub = (bytes(seed_or_pub) if len(seed_or_pub) == 32
-               else public_key(load_seed(key_path)))
+        # 32 bytes on disk is ambiguous between a seed and a public key, and so is a
+        # hex/base64 file that decodes to 32 — `load_seed` decodes either and cannot
+        # tell them apart. So collect both readings and try each: the encoded-public-key
+        # case used to be missed entirely, because only `public_key(load_seed(...))` was
+        # tried and that derives the wrong key from a public one.
+        if len(seed_or_pub) == 32:
+            candidates = [bytes(seed_or_pub), public_key(bytes(seed_or_pub))]
+        else:
+            decoded = load_seed(key_path)
+            candidates = [decoded, public_key(decoded)]
     except Exception as e:  # noqa: BLE001
         return False, f"cannot load verification key from {key_path}: {e}"
-    # A 32-byte file is ambiguous between seed and public key; try both.
-    ok, why = verify_signature(event, pub)
-    if ok:
-        return True, why
-    try:
-        ok2, why2 = verify_signature(event, public_key(load_seed(key_path)))
-        if ok2:
-            return True, why2
-    except Exception:  # noqa: BLE001
-        pass
+    why = "no candidate key verified the signature"
+    for pub in candidates:
+        ok, why = verify_signature(event, pub)
+        if ok:
+            return True, why
     return False, why
