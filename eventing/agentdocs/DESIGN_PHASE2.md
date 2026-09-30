@@ -314,9 +314,20 @@ from.
 2. **Terminal responses only** are signed in `emit.py`. The seed lives on the
    Emitter, whose constructor runs once, so none of the seven `emit()` call sites
    changed. `emit()` runs per `stdout` frame and Ed25519 costs ~150-200 ms here,
-   so signing every frame would add minutes to a chatty run. The honest limit:
-   this proves *who finished a run*, not *what it said along the way* — forged
-   `final=false` frames are still possible and still render.
+   so signing every frame would add minutes to a chatty run.
+
+   **The verifier has to match that policy, and initially did not.** Verifying
+   all-or-nothing rewrote every streamed frame of every genuine run to
+   `phase="error"` — found by running it against a live broker, not by any unit
+   test, because every test until then used terminal events. So an event carrying
+   **no** signature and **not** terminal is passed through; an unsigned *terminal*
+   event is still refused, since that is the one the transcript presents as the
+   answer. A frame that presents a bad signature is still checked — the exemption
+   is for absence, not for failure.
+
+   The honest limit that remains: this proves *who finished a run*, not *what it
+   said along the way*. Forged `final=false` frames still render. Closing that needs
+   either cheap signatures or a signed digest chain across frames.
 3. **Requests are verified** in `consume.py`, keyed on the token's `kid` when a
    keyset is configured and falling back to the single-key path otherwise. A
    rejection commits the offset without running, because a bad signature is still

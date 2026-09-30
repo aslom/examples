@@ -443,6 +443,51 @@ def test_response_decision_requires_the_bridge_kid_on_group_events(tmp_path):
     assert S.response_decision(resp, ks, require=True, bridge_kid="eventbridge")[0]
 
 
+def test_an_unsigned_non_terminal_frame_is_accepted(tmp_path):
+    """Matching the signing policy, not a loophole.
+
+    `emit()` signs terminal events only, because it runs per stdout frame at
+    ~150-200 ms a signature. Verifying all-or-nothing would rewrite every streamed
+    frame of every genuine run to phase=error — which is what happened the first time
+    this was run against a real broker.
+    """
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    frame = _event(sequence=1, phase="stdout", final="false")
+    ok, why = S.response_decision(frame, ks, require=True)
+    assert ok, why
+    assert "non-terminal" in why
+
+
+def test_an_unsigned_terminal_response_is_still_rejected(tmp_path):
+    """The line the exemption must not cross: the terminal event is the one the
+    transcript presents as the answer, so refusing it unsigned is the whole control."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    ok, why = S.response_decision(_event(phase="result", final="true"), ks, require=True)
+    assert not ok and "no ce_signature" in why
+
+
+def test_a_non_terminal_frame_that_claims_a_signature_is_still_verified(tmp_path):
+    """The exemption is for events carrying NO signature. One that presents a bad
+    signature is lying about something, and gets checked."""
+    ks = keyset.load(_write(tmp_path, {"runner-01": PUB.hex()}))
+    frame = _event(sequence=1, phase="stdout", final="false")
+    S.sign_into(frame, SEED2, "runner-01")          # approved kid, wrong key
+    ok, why = S.response_decision(frame, ks, require=True)
+    assert not ok and "does not verify" in why
+
+
+def test_an_unsigned_group_event_is_rejected_despite_having_no_final_attribute(tmp_path):
+    """Group events carry no `final` at all, so testing that alone would classify one
+    as an unsigned intermediate frame and wave it through — which is precisely the
+    forged `group.completed` the bridge kid exists to catch."""
+    ks = keyset.load(_write(tmp_path, {"eventbridge": PUB.hex()}))
+    grp = _event(type=ce.TYPE_GROUP_COMPLETED, groupid="g-1")
+    grp.attrs.pop("final", None)
+    assert "final" not in grp.attrs
+    ok, why = S.response_decision(grp, ks, require=True, bridge_kid="eventbridge")
+    assert not ok and "no ce_signature" in why
+
+
 def test_response_decision_does_not_mutate_the_event(tmp_path):
     """What "pure" buys: the caller owns the rewrite, so this is safe to call on the
     hot path of a consumer loop without copying first."""

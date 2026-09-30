@@ -402,6 +402,19 @@ def verify_request(event, cfg, ks=None) -> tuple[bool, str]:
     return verify_event(event, cfg)
 
 
+def _is_terminal(event) -> bool:
+    """Whether a signature is expected on this event.
+
+    Terminal responses are signed (`emit()` signs on `final`), and so is every group
+    lifecycle event. A group event carries no `final` attribute at all, so testing
+    `final` alone would classify it as an unsigned intermediate frame and wave it
+    through — which is exactly the forged `group.completed` this is meant to catch.
+    """
+    if ce.is_group_event(event):
+        return True
+    return str(event.get("final", "")).lower() == "true"
+
+
 def response_decision(event, ks, *, require: bool,
                       bridge_kid: str | None = None) -> tuple[bool, str]:
     """(accept_as_is, reason) for one event off the responses topic.
@@ -422,6 +435,17 @@ def response_decision(event, ks, *, require: bool,
     `bridge_kid` pins group lifecycle events to EventBridge's own key. It is only
     applied when set, so a single-key deployment — where `KeySet.select(None)` returns
     the sole key and nothing needs to name a kid — keeps working untouched.
+
+    **Unsigned non-terminal frames are accepted, and that is not a loophole being
+    left open — it is the signing policy on the other side.** `emit()` signs terminal
+    events only, because it runs for every `stdout` frame and a signature costs
+    ~150-200 ms; verifying all-or-nothing would rewrite every streamed frame of every
+    genuine run to `phase=error`. So an event that carries no signature AND is not
+    terminal is passed through, while an unsigned **terminal** event is still refused —
+    that is the one the transcript presents as the answer, and refusing it is the whole
+    control. A forged intermediate frame therefore still renders (see `emit.py`: this
+    proves who *finished* a run, not what it said along the way), but it can no longer
+    masquerade as the result.
     """
     if ks is None:
         return True, "verification not enabled"
@@ -429,6 +453,8 @@ def response_decision(event, ks, *, require: bool,
     ok, why = verify_with_keyset(event, ks, expect_kid=expect)
     if ok:
         return True, why
+    if not event.get("signature") and not _is_terminal(event):
+        return True, "unsigned non-terminal frame (signing covers terminal events)"
     return (not require), why
 
 
