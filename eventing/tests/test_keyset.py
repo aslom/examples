@@ -220,6 +220,53 @@ def test_payload_tampering_on_the_wire_is_detected():
     assert not ok
 
 
+def _tampered_on_the_wire(attr, value, **signed_attrs):
+    """Sign an event, then rewrite one `ce_` header in flight. Returns (ok, why)."""
+    e = _event(**signed_attrs)
+    e.attrs["signature"] = S.sign_event(e, SEED, kid="runner-01")
+    headers, body = ce.to_kafka_binary(e)
+    headers = [(k, value if k == f"ce_{attr}" else v) for k, v in headers]
+    return S.verify_signature(ce.from_kafka_binary(headers, body), PUB)
+
+
+def test_the_submitter_is_covered_by_the_signature():
+    """What makes the claim in eventbridge/auth.py true rather than aspirational.
+
+    `submitter` records who EventBridge believes submitted a request. Until it was in
+    SIGNED_ATTRS, anything with topic write access could rewrite that name — so the
+    audit trail named whoever the last writer chose.
+    """
+    ok, why = _tampered_on_the_wire("submitter", b"attacker",
+                                    submitter="mrsabath", submitteriss="github")
+    assert not ok and "does not verify" in why
+
+
+def test_the_submitter_issuer_is_covered_by_the_signature():
+    """Without this, a forged `submitteriss=github` upgrades a name an operator typed
+    into an env var to a login GitHub appears to have verified."""
+    ok, _ = _tampered_on_the_wire("submitteriss", b"github",
+                                  submitter="mrsabath", submitteriss="static")
+    assert not ok
+
+
+def test_the_groupid_is_covered_by_the_signature():
+    """DESIGN_PHASE1.md §21.9.9 requires it: a forged `groupid` moves a response into
+    another batch and corrupts that batch's fan-in counts."""
+    ok, _ = _tampered_on_the_wire("groupid", b"g-victim", groupid="g-mine")
+    assert not ok
+
+
+def test_adding_a_groupid_after_signing_is_detected():
+    """The absence of an attribute is signed too, not just its value — otherwise an
+    ungrouped response could be adopted into a batch it was never part of."""
+    e = _event()                       # no groupid
+    e.attrs["signature"] = S.sign_event(e, SEED, kid="runner-01")
+    headers, body = ce.to_kafka_binary(e)
+    headers.append(("ce_groupid", b"g-victim"))
+    ok, _ = S.verify_signature(ce.from_kafka_binary(headers, body), PUB)
+    assert not ok
+
+
 def test_text_plain_payload_roundtrips():
     e = _event(datacontenttype="text/plain")
     e.data = "hello"

@@ -41,10 +41,15 @@ EXT_CAUSATIONID   = "causationid"
 EXT_SIGNATURE     = "signature"
 # Phase 1 §21: the batch a correlation belongs to. At most one per correlation.
 EXT_GROUPID       = "groupid"
-# The authenticated caller that submitted this request, from EB_AUTH_TOKENS.
-# Absent when auth is disabled. NOT in signing.SIGNED_ATTRS, so it is unsigned
-# and forgeable by anyone with write access to the requests topic — it records
-# who EventBridge believes submitted, not cryptographic proof.
+# The authenticated caller that submitted this request, from EB_AUTH_TOKENS or a
+# GitHub sign-in. Absent when auth is disabled.
+#
+# In signing.SIGNED_ATTRS, so when EventBridge signs, this attribute cannot be
+# changed in flight without invalidating the signature. What that proves is bounded:
+# *EventBridge asserted this submitter*, not that the submitter is who they claim —
+# that is EXT_SUBMITTER_ISS's job. On an UNSIGNED event it remains forgeable by
+# anyone with write access to the requests topic, which is why verification has to be
+# enabled for it to mean anything at all.
 EXT_SUBMITTER     = "submitter"
 # Who vouched for EXT_SUBMITTER: "github" when the login came from a verified
 # GitHub sign-in, absent when it came from a static token. Without this a reader

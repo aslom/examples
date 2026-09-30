@@ -18,12 +18,21 @@ Two properties worth stating, because both are easy to get wrong:
   onto the request event as `ce_submitter`, which is the whole point — a `401`
   tells you nothing after the fact, a recorded submitter does.
 
-What this is NOT: the submitter attribute is **unsigned**. Anyone who can write
-to the Kafka `requests` topic can forge it, and the broker is plaintext. The
-honest claim is "EventBridge refuses unauthenticated submissions and records who
-it believes submitted this" — not "this event proves who submitted it." Proving
-it needs `submitter` inside `signing.SIGNED_ATTRS` and a producer that actually
-signs (today nothing does; see agentdocs/IMPLEMENTATION_REPORT1.md §811-814).
+What this is NOT, and the two limits that still apply. `submitter` is now inside
+`signing.SIGNED_ATTRS` and EventBridge signs the requests it publishes, so when
+signing is configured the attribute cannot be altered in flight without invalidating
+the signature. But:
+
+* **Signing is opt-in.** With no `EB_SIGNING_KEY_PATH` the events are unsigned, the
+  broker is plaintext, and anyone who can write to the `requests` topic can forge a
+  submitter. The claim only holds where verification is actually enabled.
+* **A signature proves the assertion, not the identity.** It shows EventBridge said
+  this, not that the name is real. A static `EB_AUTH_TOKENS` entry is a name an
+  operator typed into an env var; `ce_submitteriss` is what distinguishes it from a
+  login GitHub verified.
+
+So the honest claim is "EventBridge refuses unauthenticated submissions, records who
+it believes submitted, and — when signing is on — makes that record tamper-evident."
 """
 from __future__ import annotations
 

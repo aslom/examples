@@ -249,12 +249,13 @@ identity, which is §4's territory.
 
 ---
 
-## 4. Agent identity: groundwork, not yet wired
+## 4. Agent identity: wired
 
 The second question — *which agent produced this answer?* — matters more than it
-first appears. Today anything with write access to the `responses` topic gets its
-output stored, rendered in the HTML transcript, and pushed to the operator's
-phone **as a legitimate agent answer**.
+first appears. Before this, anything with write access to the `responses` topic
+got its output stored, rendered in the HTML transcript, and pushed to the
+operator's phone **as a legitimate agent answer**. With verification enabled it
+lands as a rejection instead.
 
 ### 4.1 What exists
 
@@ -273,14 +274,21 @@ phone **as a legitimate agent answer**.
 an unnamed token is ambiguous, and guessing would mean accepting a signature
 from *any* approved agent for an event that named none of them.
 
-### 4.2 The blocker, stated plainly
+### 4.2 The blocker, now cleared
 
-**`sign_event()` has no production caller.** `ER_REQUIRE_SIGNATURE=true` today
-rejects 100% of traffic — it is a kill switch, not a feature.
-`IMPLEMENTATION_REPORT1.md` §811-814 already says "EventBridge does not sign."
-Nothing about signed attributes means anything until that is fixed, which is why
-`submitter` is **not** in `SIGNED_ATTRS` yet: adding it before the signing side
-exists would only invalidate canonicalisation twice.
+This section used to read "**`sign_event()` has no production caller**" —
+`ER_REQUIRE_SIGNATURE=true` rejected 100% of traffic, a kill switch rather than a
+feature. That is fixed. EventBridge signs the requests and group events it
+publishes, EventRunner signs terminal responses, and each verifies the other's
+output against the approved-key set.
+
+`submitter`, `submitteriss` and `groupid` joined `SIGNED_ATTRS` **after** the
+signing side existed, in that order deliberately: covering them earlier would
+have invalidated canonicalisation twice for no benefit. Nothing had ever
+published a signed event, so the change needed no compatibility flag — but if
+signing is already enabled somewhere, both services must be upgraded together,
+because every grouped request now carries a signed `groupid` that an older
+verifier omits when it recomputes.
 
 ### 4.3 Why not Keycloak, and why not HMAC
 
@@ -298,27 +306,50 @@ upgrades cleanly: SPIRE later distributes the same keys rooted in workload
 attestation, and the verification code does not change — only where keys come
 from.
 
-### 4.4 The remaining work
+### 4.4 How it is wired
 
-1. Sign requests in `kafka_out.publish_request`, after `ce.new_event` (which
-   fills `id`/`time`, both signed) and before `to_kafka_binary`.
-2. Sign responses in `emit.py` between event construction and serialisation.
-   Hold the seed **on the Emitter** — its constructor runs once, so none of the
-   seven `emit()` call sites change. Sign **terminal events only**: `emit()` is
-   on the hot path for every `stdout` frame and Ed25519 costs ~150 ms here.
-3. Verify responses in `kafka_in.py` while the `CloudEvent` is still in hand.
-   Two hazards: the decode and store write are **not** inside a `try`, so a raise
-   kills the consumer thread — the verification path must degrade, never raise.
-   And group events are published by EventBridge itself, carry `groupid` but no
-   `correlationid`, so they need either their own `kid` or a skip.
-4. Then add `submitter`, `submitteriss` and the missing `groupid` to
-   `SIGNED_ATTRS`. `DESIGN_PHASE1.md` §21.9.9 requires `groupid`; its absence
-   means signatures currently say nothing about batch membership.
+1. **Requests** are signed in `kafka_out.publish_request`, after `ce.new_event`
+   fills `id`/`time` (both signed) and before `to_kafka_binary`, so the signature
+   covers exactly what goes on the wire.
+2. **Terminal responses only** are signed in `emit.py`. The seed lives on the
+   Emitter, whose constructor runs once, so none of the seven `emit()` call sites
+   changed. `emit()` runs per `stdout` frame and Ed25519 costs ~150-200 ms here,
+   so signing every frame would add minutes to a chatty run. The honest limit:
+   this proves *who finished a run*, not *what it said along the way* — forged
+   `final=false` frames are still possible and still render.
+3. **Requests are verified** in `consume.py`, keyed on the token's `kid` when a
+   keyset is configured and falling back to the single-key path otherwise. A
+   rejection commits the offset without running, because a bad signature is still
+   bad on redelivery, and increments `rejected_unsigned` so it is distinguishable
+   from the stale-request drop.
+4. **Responses are verified** in `kafka_in.py` while the `CloudEvent` is still in
+   hand — the check needs `.attrs`/`.data`, which `envelope_dict` has flattened.
+   The decision itself is a pure function in `shared/signing.py`, which is what
+   makes this path testable at all: the consumer had no behavioural test before.
+5. **Group events are signed** under EventBridge's own `kid`, and the verifier
+   accepts *only* that kid for them. Skipping them instead would have left the one
+   hole worth closing — a forged `group.completed` ends a batch early and fires a
+   "finished" notification for work that never ran. A flat keyset is not enough
+   here: any approved runner would otherwise do.
+6. `submitter`, `submitteriss` and `groupid` joined `SIGNED_ATTRS` last (§4.2).
 
-On failure, set `phase="error"`. That reuses machinery already wired: ntfy
-**priority 5** with an error tag, a visually distinct bubble in the live SSE
-transcript, and `raw_json` persistence for audit. The demo artifact costs
-nothing extra.
+**Both hazards in step 4 were real.** `from_kafka_binary` and `insert_response`
+are not inside a `try`, so anything raising in the verification path would end the
+consume loop for the life of the pod — silently, with the process still healthy.
+The guard around the decision call fails closed only where enforcement is on: if
+the verifier itself is broken, an unverifiable event is not evidence of anything.
+
+On failure the event is stored with `phase="error"` rather than dropped — a drop is
+indistinguishable from an agent that never answered. That reuses machinery already
+wired: ntfy **priority 5** with an error tag (the error body comes from
+`data["text"]`, so the key name is load-bearing), a red card in the live SSE
+transcript, and `raw_json` persistence for audit.
+
+**Rollout is two flags.** A keyset alone verifies and logs while storing events
+unchanged; `EB_REQUIRE_RESPONSE_SIGNATURE=true` is what rewrites them. Enforcement
+mutates persisted rows and pages a phone, so there is a step where the reject rate
+is observable first. EventBridge refuses to start with a keyset but no
+`EB_SIGNING_KID`, since there would be nothing to attribute a group event to.
 
 ---
 
@@ -332,9 +363,28 @@ nothing extra.
 | `EB_AUTH_TOKENS` | empty | `name:token,...` fallback. Empty plus no GitHub config means auth is off. |
 | `EVENTBRIDGE_TOKEN` | unset | CLI: overrides the stored token, so a shell can act as another identity. |
 
-The client id lives in `config.toml` because it is not a capability. `test_manifests.py`
-pins the opposite rule for `NTFY_TOPIC`/`NTFY_TOKEN`, and that distinction is the
-point: one is public by construction, the others grant access.
+Agent identity (§4). Every one of these is off by default, so the e2e path is
+unaffected until an operator opts in:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `EB_SIGNING_KEY_PATH` | empty | Ed25519 seed EventBridge signs requests and group events with. Empty = no signing. |
+| `EB_SIGNING_KID` | empty | Names EventBridge's key. Also the **only** kid accepted on group lifecycle events. |
+| `EB_VERIFY_KEYSET_PATH` | empty | Approved-key set for responses. Empty = no verification. |
+| `EB_REQUIRE_RESPONSE_SIGNATURE` | `false` | `false` = verify and log (audit); `true` = rewrite failures to `phase=error`. |
+| `ER_SIGNING_KEY_PATH` | empty | Seed EventRunner signs terminal responses with. |
+| `ER_SIGNING_KID` | empty | Names this runner's key. Needed once more than one runner is approved. |
+| `ER_REQUIRE_SIGNATURE` | `false` | Refuse unsigned or badly-signed requests. |
+| `ER_VERIFY_KEYSET_PATH` | empty | Approved-key set for requests. Empty falls back to `ER_VERIFY_KEY_PATH`'s single key. |
+
+Seed paths name **Secret** mounts and are env-only, never `config.toml`. Keyset
+paths name **ConfigMaps** — only public keys belong in them, and `keyset.load()`
+cannot tell a seed from a public key by length, so the file's location is what keeps
+the distinction reviewable.
+
+The GitHub client id lives in `config.toml` because it is not a capability.
+`test_manifests.py` pins the opposite rule for `NTFY_TOPIC`/`NTFY_TOKEN`, and that
+distinction is the point: one is public by construction, the others grant access.
 
 ---
 

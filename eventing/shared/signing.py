@@ -1,7 +1,9 @@
 """Detached JWS over the CloudEvent envelope. DESIGN_PHASE1.md §11.
 
-Feature-flagged and **disabled by default**, so the e2e path is unaffected and
-signing can be enabled independently of causation binding.
+Feature-flagged and **off by default**, so the e2e path is unaffected. Both services
+use this module: EventBridge signs the requests and group events it publishes,
+EventRunner signs terminal responses, and each verifies what the other produced
+against `shared.keyset` — which is the authorization list, not merely a key lookup.
 
 Two design constraints shape this:
 
@@ -79,11 +81,18 @@ def _scalar_mult(p: tuple[int, int], e: int) -> tuple[int, int]:
 
     `if e & 1` branches on secret bits when `e` is the secret scalar from
     `_secret_scalar`, and `_edwards_add` does a modular inversion per addition, so
-    wall-clock time varies with the scalar's Hamming weight. That is acceptable
-    *here* only because of where this runs: signing is feature-flagged off
-    (`ER_REQUIRE_SIGNATURE=false`), the seed never leaves the pod, and nothing
-    exposes a remote timing oracle over `sign()`. Verification uses only public
-    inputs, so it is not the sensitive direction.
+    wall-clock time varies with the scalar's Hamming weight. Verification uses only
+    public inputs, so it is not the sensitive direction.
+
+    **This justification weakened when signing got production callers.** It used to
+    rest on "nothing exposes a remote timing oracle over `sign()`", which is no longer
+    strictly true: with `EB_SIGNING_KEY_PATH` set, EventBridge signs on the HTTP
+    request path, so a caller who can time `POST /v0/agents` observes something
+    correlated with the scalar. What still makes it acceptable is that the signal is
+    buried under a Kafka round trip and a ~150 ms pure-Python operation whose variance
+    dwarfs the leak, the seed never leaves the pod, and signing remains opt-in. It is
+    a real if impractical weakness rather than a non-issue — do not promote this to a
+    trust boundary that assumes constant time.
 
     If the pure-Python constraint (§1.1) is ever relaxed, `cryptography`'s Ed25519
     is the better trade than hardening this by hand.
@@ -175,7 +184,15 @@ def verify(message: bytes, signature: bytes, pub: bytes) -> bool:
 # verifier must not accept a signature that covered less than it thinks.
 SIGNED_ATTRS = ("specversion", "type", "source", "id", "time", "subject",
                 "datacontenttype", "correlationid", "sessionuuid", "sequence",
-                "phase", "final", "mode", "causationid")
+                "phase", "final", "mode", "causationid",
+                # Added once signing had real callers. `submitter`/`submitteriss`
+                # were held back deliberately: covering them before anything signed
+                # would have invalidated canonicalisation twice for no benefit.
+                # `groupid` is required by DESIGN_PHASE1.md §21.9.9 — without it a
+                # signature says nothing about which batch an event belongs to, so a
+                # forged `groupid` could move a response into another batch and
+                # corrupt its fan-in counts.
+                "submitter", "submitteriss", "groupid")
 
 
 def data_bytes(data: Any) -> bytes:

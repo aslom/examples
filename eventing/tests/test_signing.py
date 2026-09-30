@@ -118,8 +118,19 @@ def test_canonical_binds_the_payload_by_digest():
 
 
 def test_canonical_changes_when_any_signed_attribute_changes():
+    """Derived from SIGNED_ATTRS rather than listed by hand.
+
+    A hardcoded list silently stops covering whatever is added to the tuple next,
+    which is exactly what happened when `submitter`/`submitteriss`/`groupid` were
+    added. `specversion` is excluded because a different value is not a different
+    event but a different envelope format, and `datacontenttype` because changing it
+    changes how `data` is encoded rather than only the attribute.
+    """
+    skip = {"specversion", "datacontenttype"}
+    covered = [a for a in S.SIGNED_ATTRS if a not in skip]
+    assert len(covered) >= 15, "SIGNED_ATTRS shrank unexpectedly"
     base = S.canonical(_event().attrs, None)
-    for attr in ("id", "correlationid", "sessionuuid", "mode", "phase", "causationid"):
+    for attr in covered:
         other = S.canonical(_event(**{attr: "different"}).attrs, None)
         assert other != base, f"{attr} is in SIGNED_ATTRS but did not affect the digest"
 
