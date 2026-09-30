@@ -6,14 +6,35 @@ from typing import Any
 
 from kafka import KafkaProducer
 
-from shared import ce
+from shared import ce, signing
 
 
 class Emitter:
-    def __init__(self, bootstrap: str, response_topic: str, source_uri: str) -> None:
+    """§11: signs **terminal events only**, and what that does and does not prove.
+
+    `emit()` runs for every `stdout` frame an agent produces, and the pure-Python
+    Ed25519 here costs ~150-200 ms per signature, so signing every frame would add
+    minutes to a chatty run. Terminal events are one per run, where the cost is
+    invisible against an agent that already took seconds.
+
+    The honest consequence: a signature on the terminal event proves **who finished a
+    run**, not **what the run said along the way**. Anything with write access to the
+    responses topic can still forge `final=false` frames for a live correlation, and
+    they will render in the transcript. Closing that needs either cheap signatures or
+    a signed digest chain across frames; neither is in scope here, and claiming
+    otherwise while demoing would be wrong.
+
+    The seed lives on the instance, so none of the seven `emit()` call sites in
+    `runner.py` know signing exists.
+    """
+
+    def __init__(self, bootstrap: str, response_topic: str, source_uri: str,
+                 seed: bytes | None = None, kid: str | None = None) -> None:
         self._prod = KafkaProducer(bootstrap_servers=bootstrap, acks="all", linger_ms=5)
         self._topic = response_topic
         self._source = source_uri
+        self._seed = seed
+        self._kid = kid
         self._seq_lock = threading.Lock()
         self._seq_by_corr: dict[str, int] = {}
 
@@ -56,6 +77,10 @@ class Emitter:
             data=data,
             **attrs,
         )
+        # Terminal events only — see the class docstring for the cost and the limit
+        # that buys. `final` is already the parameter, so no call site changes.
+        if final:
+            signing.sign_into(event, self._seed, self._kid)
         headers, value = ce.to_kafka_binary(event)
         self._prod.send(self._topic,
                         key=correlationid.encode(),

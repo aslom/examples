@@ -96,6 +96,14 @@ class Cfg:
     require_signature: bool = False
     signing_key_path: str = ""
     verify_key_path: str = ""
+    # The approved-key set: kid -> public key. When set, request verification
+    # selects a key by the token's kid instead of assuming one key, which is what
+    # makes it an allowlist of several agents rather than a single-key check. Empty
+    # falls back to verify_key_path, so the older one-key deployment is unchanged.
+    verify_keyset_path: str = ""
+    # The kid this runner names in the responses it signs. Empty still signs, and a
+    # verifier holding exactly one key accepts it; name it as soon as there are two.
+    signing_kid: str = ""
 
 
 def load() -> Cfg:
@@ -140,9 +148,11 @@ def load() -> Cfg:
     cfg.eventbridge_url       = e("ER_EVENTBRIDGE_URL", cfg.eventbridge_url)
     cfg.transcript_max_bytes  = int(e("ER_TRANSCRIPT_MAX_BYTES", str(cfg.transcript_max_bytes)))
 
-    cfg.require_signature = _bool(e("ER_REQUIRE_SIGNATURE"), False)
-    cfg.signing_key_path  = e("ER_SIGNING_KEY_PATH", cfg.signing_key_path)
-    cfg.verify_key_path   = e("ER_VERIFY_KEY_PATH",  cfg.verify_key_path)
+    cfg.require_signature  = _bool(e("ER_REQUIRE_SIGNATURE"), False)
+    cfg.signing_key_path   = e("ER_SIGNING_KEY_PATH", cfg.signing_key_path)
+    cfg.verify_key_path    = e("ER_VERIFY_KEY_PATH",  cfg.verify_key_path)
+    cfg.verify_keyset_path = e("ER_VERIFY_KEYSET_PATH", cfg.verify_keyset_path)
+    cfg.signing_kid        = e("ER_SIGNING_KID",      cfg.signing_kid)
 
     base = e("TMPDIR", "/tmp").rstrip("/")
     cfg.tmpdir = f"{base}/rossoctl-keda1"

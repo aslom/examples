@@ -66,7 +66,8 @@ class Consumer(threading.Thread):
     def __init__(self, cfg: Cfg, router: Router, *,
                  heartbeat: Heartbeat | None = None,
                  ledger: OffsetLedger | None = None,
-                 consumer_factory=None) -> None:
+                 consumer_factory=None,
+                 keyset=None) -> None:
         super().__init__(daemon=True, name="kafka-requests-consumer")
         self._cfg = cfg
         self._router = router
@@ -90,6 +91,11 @@ class Consumer(threading.Thread):
         self._seeded: set = set()
         self._connect_attempts = 0
         self._skipped_stale = 0
+        # §11: the approved-agent set, or None to fall back to the single-key path.
+        # Loaded once by __main__ — never re-read here, so the trust set cannot widen
+        # mid-run.
+        self._keyset = keyset
+        self._rejected_unsigned = 0
         self._paused = False
 
     # ---- lifecycle ----
@@ -107,6 +113,13 @@ class Consumer(threading.Thread):
     @property
     def skipped_stale(self) -> int:
         return self._skipped_stale
+
+    @property
+    def rejected_unsigned(self) -> int:
+        """Requests refused for a missing or bad signature. Distinct from
+        `skipped_stale`: both commit the offset without running, and an operator
+        needs to know which one is happening."""
+        return self._rejected_unsigned
 
     def _build_consumer(self) -> KafkaConsumer:
         return KafkaConsumer(
@@ -272,8 +285,11 @@ class Consumer(threading.Thread):
 
         if self._cfg.require_signature:
             from shared import signing
-            ok, why = signing.verify_event(evt, self._cfg)
+            # With a keyset this is an allowlist keyed on the token's `kid`; without
+            # one it stays the single-key check it has always been.
+            ok, why = signing.verify_request(evt, self._cfg, self._keyset)
             if not ok:
+                self._rejected_unsigned += 1
                 _elog(f"rejecting unsigned/badly-signed request corr={corr}: {why} "
                       f"(ER_REQUIRE_SIGNATURE=true) — offset committed, not retried")
                 self._skip(topic, partition, offset)

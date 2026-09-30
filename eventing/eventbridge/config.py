@@ -58,6 +58,25 @@ class Cfg:
     # GitHub API call per request would spend a 5000/hour budget and add GitHub's
     # latency to the request path.
     github_cache_ttl_s: float = 300.0
+    # §11 — signing the requests and group events EventBridge publishes. Empty
+    # disables it, which is the default: a key is a capability, and the demo has to
+    # work with none. Env only, never config.toml — the file it points at is a
+    # Secret mount (same rule as auth_tokens and NTFY_TOKEN above).
+    signing_key_path: str = ""
+    # The kid written into the protected header, naming EventBridge's own key in the
+    # approved set. Also the kid group lifecycle events must be signed by: the set is
+    # otherwise flat, so without this any approved runner could forge a
+    # group.completed and end a batch early.
+    signing_kid: str = ""
+    # §11 — the approved-key set used to verify responses coming back off the
+    # responses topic. Empty disables verification entirely. A ConfigMap path, not a
+    # Secret: only public keys belong in it.
+    verify_keyset_path: str = ""
+    # Whether a failed verification is ENFORCED. With a keyset but this false,
+    # EventBridge verifies and logs but stores the event unchanged — audit mode.
+    # Enforcement rewrites persisted rows and raises a priority-5 notification, so
+    # there has to be a way to watch the reject rate before turning it on.
+    require_response_signature: bool = False
     ntfy: NtfyCfg = field(default_factory=NtfyCfg)
 
 
@@ -120,6 +139,15 @@ def load() -> Cfg:
         cfg.allowed_users = ghauth.parse_allowed_users(allowed_env)
     cfg.github_cache_ttl_s = float(e("EB_GITHUB_CACHE_TTL_S",
                                      str(cfg.github_cache_ttl_s)))
+    # §11. Env only: the seed path names a Secret mount, and keeping the whole
+    # signing block in one layer means it cannot be half-configured from a
+    # committed file.
+    cfg.signing_key_path    = e("EB_SIGNING_KEY_PATH",    cfg.signing_key_path)
+    cfg.signing_kid         = e("EB_SIGNING_KID",         cfg.signing_kid)
+    cfg.verify_keyset_path  = e("EB_VERIFY_KEYSET_PATH",  cfg.verify_keyset_path)
+    cfg.require_response_signature = (
+        e("EB_REQUIRE_RESPONSE_SIGNATURE",
+          "true" if cfg.require_response_signature else "false").lower() == "true")
 
     cfg.ntfy.enabled  = (e("NTFY_ENABLED", "true" if cfg.ntfy.enabled else "false").lower() == "true")
     cfg.ntfy.base_url = e("NTFY_BASE_URL", cfg.ntfy.base_url)

@@ -11,6 +11,7 @@ from eventrunner.emit import Emitter
 from eventrunner.router import Router
 from eventrunner.runner import log_forwarded_env, run_agent
 from eventrunner.transcript import TranscriptStore
+from shared import keyset, signing
 from shared.heartbeat import Heartbeat
 from shared.pidfile import PidFile
 
@@ -55,13 +56,38 @@ def main() -> int:
     heartbeat = Heartbeat(cfg.heartbeat_path)
     heartbeat.touch()      # before Kafka, so an absent file always means "never started"
 
-    emitter = Emitter(cfg.kafka_bootstrap, cfg.response_topic, cfg.source_uri)
+    # §11 — key material is loaded ONCE, here, and deliberately not caught. A runner
+    # that believes it is signing but is not, or that cannot read the set it verifies
+    # against, is worse than one that refuses to start: the first failure mode is
+    # silent and the second is in `kubectl logs` before any request is accepted.
+    seed = None
+    if cfg.signing_key_path:
+        seed = signing.load_seed(cfg.signing_key_path)
+        print(f"[eventrunner] response signing ON as kid={cfg.signing_kid or '(unnamed)'} "
+              f"(seed {cfg.signing_key_path}) — terminal events only")
+    else:
+        print("[eventrunner] response signing OFF (set ER_SIGNING_KEY_PATH to enable)")
+
+    # Load once, never per record: keyset.py states that live reload is deliberately
+    # absent, and re-reading per event would let a mid-run edit silently widen the
+    # set of agents this runner trusts.
+    ks = keyset.load_if_set(cfg.verify_keyset_path)
+    if ks is not None:
+        print(f"[eventrunner] request verification uses the approved set "
+              f"{cfg.verify_keyset_path} — {len(ks)} kid(s): {', '.join(ks.kids)}")
+    elif cfg.require_signature:
+        print("[eventrunner] request verification uses a single key "
+              f"({cfg.verify_key_path or cfg.signing_key_path}); "
+              "set ER_VERIFY_KEYSET_PATH for an approved-agent list")
+
+    emitter = Emitter(cfg.kafka_bootstrap, cfg.response_topic, cfg.source_uri,
+                      seed=seed, kid=cfg.signing_kid or None)
 
     def _run(event):
         run_agent(cfg, emitter, event, transcripts=transcripts)
 
     router = Router(_run, cfg.max_concurrent)
-    consumer = Consumer(cfg, router, heartbeat=heartbeat)
+    consumer = Consumer(cfg, router, heartbeat=heartbeat, keyset=ks)
     consumer.start()
 
     stop_evt = threading.Event()
