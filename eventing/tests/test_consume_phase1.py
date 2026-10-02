@@ -7,7 +7,9 @@ raises, the main thread keeps running, and the pod reports healthy while
 consuming nothing. So the central assertion in several of these tests is not
 "it worked" but "the thread is still alive".
 """
+import binascii
 import datetime as dt
+import json
 import threading
 import time
 
@@ -17,8 +19,23 @@ from kafka.structs import OffsetAndMetadata, TopicPartition
 from eventrunner.config import Cfg, load
 from eventrunner.consume import Consumer, event_age_s
 from eventrunner.offsets import OffsetLedger
-from shared import ce
+from shared import ce, keyset
+from shared import signing as S
 from shared.heartbeat import Heartbeat
+
+# RFC 8032 vectors 1 and 2: an approved runner and a rogue. Fixed, never generated,
+# so a failure is reproducible.
+SEED = binascii.unhexlify(
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+PUB = S.public_key(SEED)
+SEED2 = binascii.unhexlify(
+    "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+
+
+def approved_keyset(tmp_path, keys=None):
+    p = tmp_path / "agents.json"
+    p.write_text(json.dumps(keys or {"runner-01": PUB.hex()}))
+    return keyset.load(str(p))
 
 # ---- fakes ------------------------------------------------------------------
 
@@ -29,7 +46,14 @@ class Rec:
 
 
 def request_record(corr="brave-otter-4718", *, offset=0, partition=0,
-                   topic="kev1-requests", mode="start", when=None, prompt="hi"):
+                   topic="kev1-requests", mode="start", when=None, prompt="hi",
+                   seed=None, kid=None):
+    """One Kafka record carrying a request event.
+
+    `seed` signs it before serialisation, the same order `kafka_out.publish_request`
+    uses — so a signed record here travels the wire exactly as a real one does,
+    rather than being signed over attributes the codec would have changed.
+    """
     attrs = {}
     if when is not None:
         attrs["time"] = when
@@ -37,6 +61,7 @@ def request_record(corr="brave-otter-4718", *, offset=0, partition=0,
                        datacontenttype="application/json",
                        correlationid=corr, sessionuuid=ce.session_uuid(corr),
                        mode=mode, data={"prompt": prompt}, **attrs)
+    S.sign_into(evt, seed, kid)
     headers, value = ce.to_kafka_binary(evt)
     return Rec(topic, partition, offset, headers, value)
 
@@ -486,3 +511,138 @@ def test_stop_intake_pauses_fetching_but_keeps_committing(tmp_path):
     assert {("kev1-requests", 0): 1} in fake.commits, \
         "a commit must still land while draining"
     assert fake.paused_tps, "intake stops by pausing the assignment"
+
+
+# ---- §11: signature verification, the reject branches ------------------------
+#
+# `consume.py`'s verification branch had no tests at all: until this change nothing
+# signed, so there was no way to reach the accept side and the reject side was
+# indistinguishable from "always rejects". Each test below asserts the same three
+# things the stale-request guard does, because a rejection that loses the offset is a
+# poison pill that blocks the partition forever:
+#   1. the request did not reach the router,
+#   2. a named counter says why it was refused,
+#   3. the offset still advanced.
+
+def _signed_setup(tmp_path, *, seed, kid, ks=None, **cfg_over):
+    tp = TopicPartition("kev1-requests", 0)
+    rec = request_record(offset=0, seed=seed, kid=kid)
+    fake = FakeConsumer([{tp: [rec]}], committed={tp: OffsetAndMetadata(0, "", -1)})
+    router = RecordingRouter()
+    cfg = cfg_for(tmp_path, require_signature=True, **cfg_over)
+    return fake, router, Consumer(cfg, router, keyset=ks)
+
+
+def test_a_request_from_an_approved_agent_runs(tmp_path):
+    """The accept side, which was unreachable before anything signed."""
+    fake, router, c = _signed_setup(tmp_path, seed=SEED, kid="runner-01",
+                                   ks=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: router.submitted)
+    assert len(router.submitted) == 1, "an approved, correctly signed request must run"
+    assert c.rejected_unsigned == 0
+
+
+def test_an_unsigned_request_is_rejected_when_signatures_are_required(tmp_path):
+    fake, router, c = _signed_setup(tmp_path, seed=None, kid=None,
+                                   ks=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: fake.commits)
+    assert router.submitted == [], "an unsigned request must not reach the router"
+    assert c.rejected_unsigned == 1
+    assert {("kev1-requests", 0): 1} in fake.commits, "but its offset must advance"
+
+
+def test_a_request_signed_by_an_unapproved_key_is_rejected(tmp_path):
+    """The forgery the demo turns on: a real signature from a key nobody approved.
+
+    The attacker holds a valid Ed25519 key and can produce a structurally perfect
+    signature. Being unforgeable is not the point — being *unapproved* is.
+    """
+    fake, router, c = _signed_setup(tmp_path, seed=SEED2, kid="runner-99",
+                                   ks=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: fake.commits)
+    assert router.submitted == [], "an unapproved signer must not reach the router"
+    assert c.rejected_unsigned == 1
+    assert {("kev1-requests", 0): 1} in fake.commits
+
+
+def test_a_rogue_key_claiming_an_approved_kid_is_rejected(tmp_path):
+    """The nastier case: the attacker knows an approved kid but not its key. The kid
+    resolves, so only the signature check stands between them and a run."""
+    fake, router, c = _signed_setup(tmp_path, seed=SEED2, kid="runner-01",
+                                   ks=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: fake.commits)
+    assert router.submitted == []
+    assert c.rejected_unsigned == 1
+
+
+def test_an_unnamed_token_is_rejected_when_the_approved_set_is_ambiguous(tmp_path):
+    """Two approved keys and a token naming neither: accepting it would mean taking a
+    signature from ANY approved agent for an event that claimed none of them."""
+    ks = approved_keyset(tmp_path, {"runner-01": PUB.hex(),
+                                    "runner-02": S.public_key(SEED2).hex()})
+    fake, router, c = _signed_setup(tmp_path, seed=SEED, kid=None, ks=ks)
+    drive(c, fake, until=lambda: fake.commits)
+    assert router.submitted == []
+    assert c.rejected_unsigned == 1
+
+
+def test_an_unnamed_token_runs_against_a_single_key_set(tmp_path):
+    """The friendly deployment: one approved key, so nothing has to name it."""
+    fake, router, c = _signed_setup(tmp_path, seed=SEED, kid=None,
+                                   ks=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: router.submitted)
+    assert len(router.submitted) == 1
+
+
+def test_the_single_key_path_still_works_without_a_keyset(tmp_path):
+    """Back-compat: ER_REQUIRE_SIGNATURE with only ER_VERIFY_KEY_PATH predates the
+    keyset and is still the simplest useful deployment."""
+    key = tmp_path / "verify.hex"
+    key.write_text(PUB.hex())
+    fake, router, c = _signed_setup(tmp_path, seed=SEED, kid=None, ks=None,
+                                   verify_key_path=str(key))
+    drive(c, fake, until=lambda: router.submitted)
+    assert len(router.submitted) == 1, "a single configured key must still verify"
+
+
+def test_verification_is_skipped_entirely_when_not_required(tmp_path):
+    """The default path: an unsigned request runs, and no signing work happens."""
+    tp = TopicPartition("kev1-requests", 0)
+    fake = FakeConsumer([{tp: [request_record(offset=0)]}],
+                        committed={tp: OffsetAndMetadata(0, "", -1)})
+    router = RecordingRouter()
+    c = Consumer(cfg_for(tmp_path), router)          # require_signature defaults False
+    drive(c, fake, until=lambda: router.submitted)
+    assert len(router.submitted) == 1
+    assert c.rejected_unsigned == 0
+
+
+def test_a_stale_request_is_dropped_before_its_signature_is_checked(tmp_path):
+    """Ordering, pinned: a replayed day-old event is history, not an attack, and must
+    not cost a ~150 ms verification each to discard."""
+    tp = TopicPartition("kev1-requests", 0)
+    old = request_record(offset=0, when=_iso(86400))   # stale AND unsigned
+    fake = FakeConsumer([{tp: [old]}], committed={tp: OffsetAndMetadata(0, "", -1)})
+    router = RecordingRouter()
+    c = Consumer(cfg_for(tmp_path, require_signature=True, max_request_age_s=3600),
+                 router, keyset=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: fake.commits)
+    assert router.submitted == []
+    assert c.skipped_stale == 1, "the age guard must fire..."
+    assert c.rejected_unsigned == 0, "...instead of the signature check"
+
+
+def test_the_consumer_thread_survives_a_rejected_request(tmp_path):
+    """The failure mode this whole file exists for: a reject path that kills the
+    thread leaves a pod that reports healthy and consumes nothing."""
+    tp = TopicPartition("kev1-requests", 0)
+    bad = request_record(corr="brave-otter-4718", offset=0, seed=SEED2, kid="runner-99")
+    good = request_record(corr="calm-badger-1234", offset=1, seed=SEED, kid="runner-01")
+    fake = FakeConsumer([{tp: [bad, good]}], committed={tp: OffsetAndMetadata(0, "", -1)})
+    router = RecordingRouter()
+    c = Consumer(cfg_for(tmp_path, require_signature=True), router,
+                 keyset=approved_keyset(tmp_path))
+    drive(c, fake, until=lambda: router.submitted)
+    assert c.rejected_unsigned == 1, "the first record was refused"
+    assert len(router.submitted) == 1, "and the loop went on to process the second"
+    assert router.submitted[0]["correlationid"] == "calm-badger-1234"

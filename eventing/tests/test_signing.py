@@ -7,13 +7,14 @@ RFC's own vectors, which is what the first tests here do.
 The canonicalization tests matter just as much: §11 says outright that signer and
 verifier agreeing byte-for-byte "is the part that will bite".
 """
+import base64
 import binascii
 import json
 
 import pytest
 
-from eventrunner import signing as S
 from shared import ce
+from shared import signing as S
 
 # ---- RFC 8032 §7.1 test vectors --------------------------------------------
 
@@ -117,8 +118,19 @@ def test_canonical_binds_the_payload_by_digest():
 
 
 def test_canonical_changes_when_any_signed_attribute_changes():
+    """Derived from SIGNED_ATTRS rather than listed by hand.
+
+    A hardcoded list silently stops covering whatever is added to the tuple next,
+    which is exactly what happened when `submitter`/`submitteriss`/`groupid` were
+    added. `specversion` is excluded because a different value is not a different
+    event but a different envelope format, and `datacontenttype` because changing it
+    changes how `data` is encoded rather than only the attribute.
+    """
+    skip = {"specversion", "datacontenttype"}
+    covered = [a for a in S.SIGNED_ATTRS if a not in skip]
+    assert len(covered) >= 15, "SIGNED_ATTRS shrank unexpectedly"
     base = S.canonical(_event().attrs, None)
-    for attr in ("id", "correlationid", "sessionuuid", "mode", "phase", "causationid"):
+    for attr in covered:
         other = S.canonical(_event(**{attr: "different"}).attrs, None)
         assert other != base, f"{attr} is in SIGNED_ATTRS but did not affect the digest"
 
@@ -279,3 +291,41 @@ def test_verify_event_uses_the_configured_key(tmp_path):
     e.attrs["signature"] = S.sign_event(e, seed)
     ok, why = S.verify_event(e, cfg)
     assert ok, why
+
+
+@pytest.mark.parametrize("form", ["raw-pub", "hex-pub", "b64-pub",
+                                  "raw-seed", "hex-seed", "b64-seed"])
+def test_verify_event_accepts_a_key_in_any_documented_form(tmp_path, form):
+    """`ER_VERIFY_KEY_PATH` may hold a seed or a public key, in raw, hex or base64.
+
+    A 32-byte file cannot be told apart from an encoded one by content, so all six
+    combinations have to work. A hex-encoded PUBLIC key used to fail: only
+    `public_key(load_seed(path))` was tried for encoded files, which derives a
+    different key when the file already holds a public one.
+    """
+    from eventrunner.config import Cfg
+    seed = binascii.unhexlify(RFC_VECTORS[1][0])
+    pub = S.public_key(seed)
+    material = seed if form.endswith("seed") else pub
+    encode = {"raw": lambda b: b,
+              "hex": lambda b: b.hex().encode(),
+              "b64": base64.b64encode}[form.split("-")[0]]
+    key = tmp_path / "key.bin"
+    key.write_bytes(encode(material))
+    e = _event()
+    e.attrs["signature"] = S.sign_event(e, seed)
+    ok, why = S.verify_event(e, Cfg(verify_key_path=str(key)))
+    assert ok, f"{form}: {why}"
+
+
+def test_verify_event_still_rejects_an_unrelated_key(tmp_path):
+    """Accepting more *encodings* must not mean accepting more *keys*."""
+    from eventrunner.config import Cfg
+    seed, other = (binascii.unhexlify(RFC_VECTORS[1][0]),
+                   binascii.unhexlify(RFC_VECTORS[2][0]))
+    key = tmp_path / "other.hex"
+    key.write_text(S.public_key(other).hex())
+    e = _event()
+    e.attrs["signature"] = S.sign_event(e, seed)
+    ok, why = S.verify_event(e, Cfg(verify_key_path=str(key)))
+    assert not ok and "does not verify" in why

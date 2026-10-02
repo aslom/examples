@@ -1,16 +1,10 @@
 """The approved-key set: `kid` -> Ed25519 public key. Stdlib only.
 
-**Not yet enforced.** Nothing consults this module today — `signing.verify_event`
-resolves a single key from `ER_VERIFY_KEY_PATH`/`ER_SIGNING_KEY_PATH` and ignores
-`kid` entirely. The primitives and their tests are in place so that wiring it in is
-a small change; it also needs a config field for the path, which does not exist yet.
-Until then `kid` is signature-covered but unused: a token naming an unknown key id
-still verifies, because nothing selects a key by it.
-
-Once wired, this file **is** the authorization list: a signed event whose `kid` is
-not in the set is refused, and so is one carrying no signature at all. Approving an
-agent means adding its public key here; revoking it means removing the entry. That
-is a deliberate design choice rather than a placeholder for something richer:
+`signing.verify_with_keyset` consults this module, so this file **is** the
+authorization list: a signed event whose `kid` is not in the set is refused, and so is
+one carrying no signature at all. Approving an agent means adding its public key here;
+revoking it means removing the entry. That is a deliberate design choice rather than a
+placeholder for something richer:
 
 * It needs no issuer, no network call, and no clock, so it works identically on a
   laptop and in a cluster.

@@ -1,7 +1,9 @@
 """Detached JWS over the CloudEvent envelope. DESIGN_PHASE1.md §11.
 
-Feature-flagged and **disabled by default**, so the e2e path is unaffected and
-signing can be enabled independently of causation binding.
+Feature-flagged and **off by default**, so the e2e path is unaffected. Both services
+use this module: EventBridge signs the requests and group events it publishes,
+EventRunner signs terminal responses, and each verifies what the other produced
+against `shared.keyset` — which is the authorization list, not merely a key lookup.
 
 Two design constraints shape this:
 
@@ -31,7 +33,10 @@ import binascii
 import hashlib
 import json
 import pathlib
+import sys
 from typing import Any
+
+from shared import ce
 
 # ---- Ed25519 (RFC 8032), pure Python ---------------------------------------
 
@@ -76,11 +81,18 @@ def _scalar_mult(p: tuple[int, int], e: int) -> tuple[int, int]:
 
     `if e & 1` branches on secret bits when `e` is the secret scalar from
     `_secret_scalar`, and `_edwards_add` does a modular inversion per addition, so
-    wall-clock time varies with the scalar's Hamming weight. That is acceptable
-    *here* only because of where this runs: signing is feature-flagged off
-    (`ER_REQUIRE_SIGNATURE=false`), the seed never leaves the pod, and nothing
-    exposes a remote timing oracle over `sign()`. Verification uses only public
-    inputs, so it is not the sensitive direction.
+    wall-clock time varies with the scalar's Hamming weight. Verification uses only
+    public inputs, so it is not the sensitive direction.
+
+    **This justification weakened when signing got production callers.** It used to
+    rest on "nothing exposes a remote timing oracle over `sign()`", which is no longer
+    strictly true: with `EB_SIGNING_KEY_PATH` set, EventBridge signs on the HTTP
+    request path, so a caller who can time `POST /v0/agents` observes something
+    correlated with the scalar. What still makes it acceptable is that the signal is
+    buried under a Kafka round trip and a ~150 ms pure-Python operation whose variance
+    dwarfs the leak, the seed never leaves the pod, and signing remains opt-in. It is
+    a real if impractical weakness rather than a non-issue — do not promote this to a
+    trust boundary that assumes constant time.
 
     If the pure-Python constraint (§1.1) is ever relaxed, `cryptography`'s Ed25519
     is the better trade than hardening this by hand.
@@ -172,7 +184,15 @@ def verify(message: bytes, signature: bytes, pub: bytes) -> bool:
 # verifier must not accept a signature that covered less than it thinks.
 SIGNED_ATTRS = ("specversion", "type", "source", "id", "time", "subject",
                 "datacontenttype", "correlationid", "sessionuuid", "sequence",
-                "phase", "final", "mode", "causationid")
+                "phase", "final", "mode", "causationid",
+                # Added once signing had real callers. `submitter`/`submitteriss`
+                # were held back deliberately: covering them before anything signed
+                # would have invalidated canonicalisation twice for no benefit.
+                # `groupid` is required by DESIGN_PHASE1.md §21.9.9 — without it a
+                # signature says nothing about which batch an event belongs to, so a
+                # forged `groupid` could move a response into another batch and
+                # corrupt its fan-in counts.
+                "submitter", "submitteriss", "groupid")
 
 
 def data_bytes(data: Any) -> bytes:
@@ -256,6 +276,37 @@ def sign_event(event, seed: bytes, kid: str | None = None) -> str:
     return f"{protected}..{_b64u(sig)}"
 
 
+def sign_into(event, seed: bytes | None, kid: str | None = None) -> bool:
+    """Assign `event.attrs["signature"]` when a seed is configured. Returns whether
+    it signed.
+
+    `sign_event` does not mutate, so every producer would otherwise repeat the same
+    three lines; this is the one place that decides what "signing is enabled" means.
+
+    **Never raises.** A signing failure here would turn a key-configuration mistake
+    into a total publish outage — every request rejected because one seed file has a
+    stray byte. Degrading to unsigned is the lesser harm, and it is safe only because
+    the verifying side is what enforces: an unsigned event is refused there when
+    enforcement is on. The loud failure belongs at startup instead, where the seed is
+    loaded once and a bad path stops the process.
+    """
+    if seed is None:
+        return False
+    try:
+        # `sign()` does not check the seed length — only `public_key()` does — so a
+        # truncated key file would produce a well-formed signature that no verifier
+        # can ever match, reported to the operator as success. Check it here, where
+        # production signing enters, so the failure names the key instead.
+        if len(seed) != 32:
+            raise ValueError(f"an Ed25519 seed is 32 bytes, got {len(seed)}")
+        event.attrs["signature"] = sign_event(event, seed, kid)
+        return True
+    except Exception as e:  # noqa: BLE001 - see above: publishing unsigned beats not publishing
+        print(f"[signing] could not sign {event.get('id')!r}, publishing unsigned: {e!r}",
+              file=sys.stderr, flush=True)
+        return False
+
+
 def token_kid(token: str) -> str | None:
     """The `kid` from a detached-JWS token's protected header, or None.
 
@@ -302,6 +353,111 @@ def verify_signature(event, pub: bytes) -> tuple[bool, str]:
     return True, "ok"
 
 
+# ---- authorization: the keyset as an allowlist -------------------------------
+
+def verify_with_keyset(event, ks, *, expect_kid: str | None = None) -> tuple[bool, str]:
+    """(ok, reason) for one event against an approved-key set.
+
+    The composition `tests/test_keyset.py` previously had to hand-wire: read the
+    `kid`, select the key it names, then let the signature decide. The `kid` is only
+    a hint until that last step succeeds, because the header is signed input — so a
+    token naming an unapproved key is refused for *naming* it, not because the `kid`
+    itself was disbelieved.
+
+    `expect_kid` pins the signer to one identity. Group lifecycle events use it: the
+    keyset is otherwise flat, so any approved runner could forge a `group.completed`
+    and end a batch early. Passing it restricts a class of event to one key while
+    leaving the rest of the set alone.
+
+    **Never raises**, so a caller inside a consumer loop needs no guard of its own to
+    stay alive. Every exit returns a distinct reason, because a rejection nobody can
+    explain gets diagnosed as "signing is broken" and switched off.
+    """
+    token = event.get("signature")
+    if not token:
+        return False, "no ce_signature attribute"
+    kid = token_kid(token)
+    if expect_kid and kid != expect_kid:
+        return False, (f"expected a signature from kid {expect_kid!r}, "
+                       f"got {kid!r}")
+    pub = ks.select(kid)
+    if pub is None:
+        if kid is None:
+            return False, (f"the token names no kid and the approved set holds "
+                           f"{len(ks)} keys, so it is ambiguous")
+        return False, f"kid {kid!r} is not in the approved key set"
+    return verify_signature(event, pub)
+
+
+def verify_request(event, cfg, ks=None) -> tuple[bool, str]:
+    """(ok, reason) for a request event, using whichever key source is configured.
+
+    Prefers the keyset, which is an allowlist of many approved agents. Falls back to
+    `verify_event`'s single-key path so `ER_REQUIRE_SIGNATURE=true` with only
+    `ER_VERIFY_KEY_PATH` set keeps behaving as it did — that combination predates the
+    keyset and is still the simplest useful deployment.
+    """
+    if ks is not None:
+        return verify_with_keyset(event, ks)
+    return verify_event(event, cfg)
+
+
+def _is_terminal(event) -> bool:
+    """Whether a signature is expected on this event.
+
+    Terminal responses are signed (`emit()` signs on `final`), and so is every group
+    lifecycle event. A group event carries no `final` attribute at all, so testing
+    `final` alone would classify it as an unsigned intermediate frame and wave it
+    through — which is exactly the forged `group.completed` this is meant to catch.
+    """
+    if ce.is_group_event(event):
+        return True
+    return str(event.get("final", "")).lower() == "true"
+
+
+def response_decision(event, ks, *, require: bool,
+                      bridge_kid: str | None = None) -> tuple[bool, str]:
+    """(accept_as_is, reason) for one event off the responses topic.
+
+    Pure: no I/O, no logging, and **it does not touch `event`** — the caller owns the
+    rewrite, which is what makes this testable without a Kafka consumer.
+
+    Collapsing three questions into one answer is deliberate; it leaves the caller no
+    policy to get wrong:
+
+    * `ks is None` — verification is not configured. Accept, as today.
+    * verified — accept.
+    * not verified and `require` false — **audit mode**: accept, but hand back the
+      reason so the caller can log it. Enforcement rewrites persisted rows and pages
+      a phone, so there has to be a way to watch the reject rate first.
+    * not verified and `require` true — reject; the caller stores it as `phase=error`.
+
+    `bridge_kid` pins group lifecycle events to EventBridge's own key. It is only
+    applied when set, so a single-key deployment — where `KeySet.select(None)` returns
+    the sole key and nothing needs to name a kid — keeps working untouched.
+
+    **Unsigned non-terminal frames are accepted, and that is not a loophole being
+    left open — it is the signing policy on the other side.** `emit()` signs terminal
+    events only, because it runs for every `stdout` frame and a signature costs
+    ~150-200 ms; verifying all-or-nothing would rewrite every streamed frame of every
+    genuine run to `phase=error`. So an event that carries no signature AND is not
+    terminal is passed through, while an unsigned **terminal** event is still refused —
+    that is the one the transcript presents as the answer, and refusing it is the whole
+    control. A forged intermediate frame therefore still renders (see `emit.py`: this
+    proves who *finished* a run, not what it said along the way), but it can no longer
+    masquerade as the result.
+    """
+    if ks is None:
+        return True, "verification not enabled"
+    expect = bridge_kid if (bridge_kid and ce.is_group_event(event)) else None
+    ok, why = verify_with_keyset(event, ks, expect_kid=expect)
+    if ok:
+        return True, why
+    if not event.get("signature") and not _is_terminal(event):
+        return True, "unsigned non-terminal frame (signing covers terminal events)"
+    return (not require), why
+
+
 # ---- key loading ------------------------------------------------------------
 
 def load_seed(path: str | pathlib.Path) -> bytes:
@@ -343,18 +499,21 @@ def verify_event(event, cfg) -> tuple[bool, str]:
         # with a whitespace edge byte is not truncated out of the 32-byte path.
         data = pathlib.Path(key_path).read_bytes()
         seed_or_pub = data if len(data) == 32 else data.strip()
-        pub = (bytes(seed_or_pub) if len(seed_or_pub) == 32
-               else public_key(load_seed(key_path)))
+        # 32 bytes on disk is ambiguous between a seed and a public key, and so is a
+        # hex/base64 file that decodes to 32 — `load_seed` decodes either and cannot
+        # tell them apart. So collect both readings and try each: the encoded-public-key
+        # case used to be missed entirely, because only `public_key(load_seed(...))` was
+        # tried and that derives the wrong key from a public one.
+        if len(seed_or_pub) == 32:
+            candidates = [bytes(seed_or_pub), public_key(bytes(seed_or_pub))]
+        else:
+            decoded = load_seed(key_path)
+            candidates = [decoded, public_key(decoded)]
     except Exception as e:  # noqa: BLE001
         return False, f"cannot load verification key from {key_path}: {e}"
-    # A 32-byte file is ambiguous between seed and public key; try both.
-    ok, why = verify_signature(event, pub)
-    if ok:
-        return True, why
-    try:
-        ok2, why2 = verify_signature(event, public_key(load_seed(key_path)))
-        if ok2:
-            return True, why2
-    except Exception:  # noqa: BLE001
-        pass
+    why = "no candidate key verified the signature"
+    for pub in candidates:
+        ok, why = verify_signature(event, pub)
+        if ok:
+            return True, why
     return False, why

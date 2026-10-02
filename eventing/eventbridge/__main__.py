@@ -21,6 +21,7 @@ from eventbridge.ntfy import NtfyPublisher
 from eventbridge.openapi import spec
 from eventbridge.router import Dispatcher
 from eventbridge.store import Store
+from shared import keyset, signing
 from shared.pidfile import PidFile
 
 
@@ -46,10 +47,40 @@ def main() -> int:
     for corr in store.all_correlations(limit=10000):
         minter.remember(corr)
 
+    # §11 — key material is loaded ONCE, here, and deliberately not caught. A bridge
+    # that believes it is signing but is not fails silently; one that will not start
+    # says so in `kubectl logs` before it accepts a request.
+    seed = None
+    if cfg.signing_key_path:
+        seed = signing.load_seed(cfg.signing_key_path)
+        print(f"[eventbridge] request signing ON as kid={cfg.signing_kid or '(unnamed)'} "
+              f"(seed {cfg.signing_key_path})")
+    else:
+        print("[eventbridge] request signing OFF (set EB_SIGNING_KEY_PATH to enable)")
+
+    # Loaded once, not per record: live reload is deliberately absent (keyset.py), so a
+    # mid-run edit must not silently widen the set of agents this bridge trusts.
+    ks = keyset.load_if_set(cfg.verify_keyset_path)
+    if ks is not None:
+        mode = "ENFORCING" if cfg.require_response_signature else "audit only"
+        print(f"[eventbridge] response verification ON ({mode}) — {len(ks)} kid(s): "
+              f"{', '.join(ks.kids)}")
+        if not cfg.signing_kid:
+            # Without a bridge kid there is nothing to compare a group event against,
+            # so any approved runner could forge one. Refuse rather than accept-any.
+            raise SystemExit(
+                "[eventbridge] EB_VERIFY_KEYSET_PATH is set but EB_SIGNING_KID is not: "
+                "group lifecycle events could not be attributed to this bridge. "
+                "Set EB_SIGNING_KID to the kid naming EventBridge's key.")
+    else:
+        print("[eventbridge] response verification OFF "
+              "(set EB_VERIFY_KEYSET_PATH to enable)")
+
     # The producer needs the RESPONSES topic too: group lifecycle events go there,
     # not on requests, because EventRunner would try to execute anything on requests.
     producer = Producer(cfg.kafka_bootstrap, cfg.request_topic, cfg.source_uri,
-                        response_topic=cfg.response_topic)
+                        response_topic=cfg.response_topic,
+                        seed=seed, kid=cfg.signing_kid or None)
     groups = GroupService(cfg, store, producer, minter)
 
     ntfy = NtfyPublisher(cfg.ntfy, cfg.public_base_url, store=store)
@@ -59,7 +90,10 @@ def main() -> int:
     consumer = Consumer(cfg.kafka_bootstrap, cfg.response_topic, store,
                         on_event=ntfy.submit,
                         on_group_event=groups.on_group_event,
-                        on_member_event=groups.on_member_event)
+                        on_member_event=groups.on_member_event,
+                        keyset=ks,
+                        require_signature=cfg.require_response_signature,
+                        bridge_kid=cfg.signing_kid or None)
     consumer.start()
 
     # Back-fill prompts from the requests topic — also gives us prompt visibility

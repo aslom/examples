@@ -37,3 +37,20 @@ data:
   ER_HEARTBEAT_MAX_AGE_S: "90"
   # §11, feature-flagged off: the e2e path is unaffected.
   ER_REQUIRE_SIGNATURE: "false"
+  # §11 — the approved-key set, kid -> Ed25519 public key. This file IS the
+  # authorization list: an event whose kid is not in it is refused. A ConfigMap
+  # path, never a Secret; only public keys belong in it. Empty disables the
+  # kid-aware path and falls back to ER_VERIFY_KEY_PATH's single key.
+  ER_VERIFY_KEYSET_PATH: ""
+  EB_VERIFY_KEYSET_PATH: ""
+  # The kid each service names in what it signs. EB_SIGNING_KID is also the only
+  # kid accepted on group lifecycle events, so an approved runner cannot forge a
+  # group.completed and end a batch early.
+  ER_SIGNING_KID: ""
+  EB_SIGNING_KID: ""
+  # Audit before enforce. With a keyset configured but this false, EventBridge
+  # verifies responses and logs what failed while storing them unchanged; true
+  # rewrites a failure to phase=error, which is persisted and raises a
+  # priority-5 notification. Seed paths (ER_/EB_SIGNING_KEY_PATH) are NOT here —
+  # they name Secret mounts and belong in the Deployment beside the volume.
+  EB_REQUIRE_RESPONSE_SIGNATURE: "false"

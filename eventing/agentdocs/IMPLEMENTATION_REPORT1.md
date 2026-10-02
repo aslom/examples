@@ -812,6 +812,9 @@ That is RQ-1 behaving exactly as designed, observed by accident.
   tested against the RFC vectors and the flag is wired through `consume.py`, but no
   publisher signs requests yet, so the verify-and-reject path has not been
   exercised on a cluster. EventBridge does not sign.
+  *(Resolved in Phase 2: EventBridge signs requests and group events, EventRunner
+  signs terminal responses, and both verify against the approved-key set. The
+  reject paths now have tests. See `DESIGN_PHASE2.md` §4.)*
 - **Resource requests and limits are still placeholders** (§18). A real run has
   not produced numbers.
 - **Single-broker, ephemeral storage.** A broker restart loses all topic data, and
@@ -824,7 +827,7 @@ That is RQ-1 behaving exactly as designed, observed by accident.
 ## 9. Signing: the cost of the pure-Python rule
 
 §1.1 bans C extensions, which rules out `cryptography`, so Ed25519 is implemented
-from RFC 8032 in `eventrunner/signing.py` (~120 lines) and checked against the
+from RFC 8032 in `shared/signing.py` (~120 lines) and checked against the
 RFC's own test vectors — all three pass for key derivation, signing and
 verification, plus tamper, wrong-key, malformed-input and `alg` confusion cases.
 
