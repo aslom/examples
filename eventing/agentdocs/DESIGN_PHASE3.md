@@ -301,7 +301,7 @@ ce_userkey:      gh-mrsabath-4c1d9e07     # NEW — the tenancy key
 `userkey` joins `signing.SIGNED_ATTRS`. It must: it is what decides which store a
 response is written into and which ntfy topic it is announced on, so an unsigned,
 mutable `userkey` would let anything with write access to a topic file an event into
-another user's history. See §8.2 on the canonicalisation break that adding it causes,
+another user's history. See §8.3 on the canonicalisation break that adding it causes,
 and why it has to land with `depth` in one change rather than two.
 
 **The trap.** It is tempting to salt the session derivation —
@@ -313,23 +313,24 @@ and why it has to land with `depth` in one change rather than two.
 2. It is listed in Phase 2 §1 as a thing that does not change, and a reader of these
    documents should be able to trust that list.
 3. **It is not necessary.** The collision it prevents is two users minting the same
-   `correlationid`. That is already prevented more cheaply: `Minter` dedupes against
-   everything it has seen, and in multi-tenant mode it is seeded from *every* user's
-   store at startup, so correlation ids are globally unique across tenants.
+   `correlationid`, and §6.2 already has to prevent that for an unrelated reason:
+   owner-scoped reads need a global `correlationid → userkey` index, consulted before
+   any tenant is chosen. A **unique** constraint on `correlationid` in that index is
+   therefore a global uniqueness check costing one indexed lookup per mint — and it has
+   to exist whether or not the session derivation is salted.
 
-The cost of choosing (3) is real and goes here rather than being discovered later:
-startup now reads `all_correlations()` from N stores instead of one, and the store
-layout in §6.1 is per-user files, so that is N SQLite opens before the socket binds.
-At 100 users with 10,000 correlations each that is a measurable startup delay —
-`Minter` is also the reason the existing code caps that read at 10,000 — so the
-multi-tenant path seeds **lazily per user on first use** and keeps a global
-`seen` set, with the global cap applied across all users. The invariant that
-matters is uniqueness of newly minted ids, and a correlation whose store has not
-been opened yet cannot be minted into because `mint()` checks the set it is
-building. State the residual honestly: a corr from an unseeded store is not in
-`seen`, so the guarantee is "unique against every id seen in this process plus the
-tenants touched so far", and the 1-in-400-million-per-pair collision it leaves is
-caught by the `(userkey, corr)` primary key in §6.1 rather than by the minter.
+So `Minter.mint()` consults that index instead of a `seen` set seeded from every
+tenant's store. That is the cheaper design as well as the simpler one: seeding would
+mean reading `all_correlations()` from N per-user stores (§6.1), so N SQLite opens
+before the socket binds, and at 100 tenants with 10,000 correlations each — the cap
+`__main__.py` already applies to the single-store seed today — that is a measurable
+startup delay for a guarantee one `SELECT` gives directly.
+
+**The constraint has to be on `correlationid` alone**, and this is the part to get
+right. `(userkey, correlationid)` is the correct primary key *inside* a tenant's store
+(§6.1) and is exactly the wrong constraint for the global index: two tenants minting one
+`corr` produce two different tuples, so it would never conflict and the collision would
+pass through silently — which is the failure the whole guarantee exists to prevent.
 
 ---
 
@@ -578,7 +579,7 @@ no shell scripts":
 # Render and apply everything one tenant needs. Idempotent; prints a diff first.
 python3 scripts/k8s_tenant.py apply --registry users.json --user gh-mrsabath-4c1d9e07
 python3 scripts/k8s_tenant.py apply --registry users.json --all
-python3 scripts/k8s_tenant.py diff  --registry users.json --all   # the §14.1 signal
+python3 scripts/k8s_tenant.py diff  --registry users.json --all   # Phase 1 §14.1's signal
 python3 scripts/k8s_tenant.py suspend gh-mrsabath-4c1d9e07
 python3 scripts/k8s_tenant.py delete  gh-mrsabath-4c1d9e07 --yes-delete-data
 ```
@@ -1165,8 +1166,8 @@ ARG BASE_IMAGE=quay.io/aslomnet/rossoctl-eventrunner-claude:dev
 FROM ${BASE_IMAGE}
 USER 0
 COPY --chown=0:0 agents/ /etc/rossoctl/agents/
-# §8.5's arbitrary-UID rule: readable by gid 0, never writable. An agent definition the
-# agent itself could rewrite is not a policy, it is a suggestion.
+# Phase 1 §8.5's arbitrary-UID rule: readable by gid 0, never writable. An agent
+# definition the agent itself could rewrite is not a policy, it is a suggestion.
 RUN chgrp -R 0 /etc/rossoctl && chmod -R g=rX,o= /etc/rossoctl
 USER 10001
 ```
@@ -1206,10 +1207,10 @@ belongs.
 possible and has been done in fewer than 100 lines, and it is still the wrong trade:
 it puts long-lived AWS credentials into every runner pod, adds a credential rotation
 problem, and adds a hand-rolled signer to a security path. A presigned URL is an
-expiring capability that the operator mints out-of-band, needs no SDK (§1.1 satisfied
-for free), and leaves the runner holding nothing durable. The cost — presigned URLs
-expire, so a long-lived `agent.toml` referencing one will eventually 403 — is stated in
-the error message, and is an argument for baking (§5.2) rather than for SigV4.
+expiring capability that the operator mints out-of-band, needs no SDK (Phase 1 §1.1
+satisfied for free), and leaves the runner holding nothing durable. The cost — presigned
+URLs expire, so a long-lived `agent.toml` referencing one will eventually 403 — is stated
+in the error message, and is an argument for baking (§5.2) rather than for SigV4.
 
 ### 5.4 A skill bundle is a supply-chain artifact
 
@@ -1399,13 +1400,13 @@ The alternative is one database with a `userkey` column and a `WHERE` clause on 
 query. It is cheaper — one connection pair, one startup, no file-descriptor arithmetic —
 and it is rejected:
 
-**One missed `WHERE userkey = ?` is a cross-tenant leak.** `store.py` has 25-odd query
-methods. A predicate that must be remembered 25 times, and in every method added later,
-is a predicate that will eventually be forgotten, and the symptom is a user seeing
-someone else's conversation. Separate files make the mistake structurally unavailable:
-the connection *is* the tenant, and a query cannot reach rows that are not in the file
-it is executing against. For a phase whose entire subject is isolation, buying that
-property with file descriptors is the right trade.
+**One missed `WHERE userkey = ?` is a cross-tenant leak.** `store.py` has 28 methods, and
+every one of them reads or writes tenant data. A predicate that must be remembered 28
+times, and in every method added later, is a predicate that will eventually be forgotten,
+and the symptom is a user seeing someone else's conversation. Separate files make the
+mistake structurally unavailable: the connection *is* the tenant, and a query cannot
+reach rows that are not in the file it is executing against. For a phase whose entire
+subject is isolation, buying that property with file descriptors is the right trade.
 
 Two secondary wins that are not the reason but matter: "delete my data" becomes
 `rm -rf` of one directory (§6.5), and a per-user size cap is a `du` on one directory
@@ -1459,9 +1460,11 @@ documentation. A value that is printed everywhere cannot also be the only access
 control.
 
 So in multi-tenant mode, ownership is checked: `store_registry.owner_of(corr)` consults
-a small global index (`correlationid → userkey`, the one table that is deliberately
-cross-tenant, because the lookup must happen before a tenant is chosen) and compares to
-the caller. A mismatch is **`404`, not `403`** — the opposite of Phase 2 §2.4's
+a small global index (`correlationid → userkey`, **unique on `correlationid`**, the one
+table that is deliberately cross-tenant, because the lookup must happen before a tenant
+is chosen) and compares to the caller. That uniqueness is not only for this lookup —
+§2.6 relies on it as the global collision check that lets the `sessionuuid` derivation
+stay unsalted. A mismatch is **`404`, not `403`** — the opposite of Phase 2 §2.4's
 reasoning, and for a different question. There, `403` was right because naming the
 refused *identity* makes the error actionable for a user who already knows who they
 are. Here, distinguishing "this correlation exists but is not yours" from "this
@@ -1522,8 +1525,8 @@ write is the injection path described at the top of this section.
 The honest answer is the short one: **we do not encrypt transcripts in the
 application.**
 
-The reasoning is §1.1. There is no `cryptography` dependency, so encryption would mean a
-hand-rolled AEAD. Phase 2 already hand-rolled Ed25519 and measured the result at
+The reasoning is Phase 1 §1.1. There is no `cryptography` dependency, so encryption would
+mean a hand-rolled AEAD. Phase 2 already hand-rolled Ed25519 and measured the result at
 ~150–200 ms per signature; a pure-Python ChaCha20-Poly1305 or AES-GCM would be in the
 low single-digit MB/s range, so a 32 MiB transcript at the configured cap would cost
 seconds of CPU per turn on the single-replica bridge — and more importantly it would put
@@ -1673,8 +1676,8 @@ and `from_kafka_binary` decodes every one to `str`).
 `cesql` is deliberately **not** implemented. It is a full expression language with a
 grammar, operator precedence, type coercion and functions; a hand-rolled parser for it
 would be several hundred lines of new attack surface sitting in the routing decision of
-a system that spends money, and §1.1 forbids pulling in an implementation. The escape
-hatch is that `all`/`any`/`not` compose, which covers everything except `LIKE` patterns
+a system that spends money, and Phase 1 §1.1 forbids pulling in an implementation. The
+escape hatch is that `all`/`any`/`not` compose, which covers everything except `LIKE`
 and arithmetic. If a deployment truly needs `cesql`, that is the dependency
 conversation, not a weekend parser.
 
@@ -1693,10 +1696,10 @@ would invite exactly the mistake of treating payload content as a security decis
 
 The template language is **deliberately tiny**: `{{dotted.path}}` lookups into the
 event's JSON, with two filters, `|json` and `|truncate:N`. Not Jinja — a dependency
-§1.1 forbids, and a sandbox-escape surface in a path that builds instructions for a
-tool-holding model. Missing paths render as the empty string and are recorded in the
-trigger's `last_error`, because a trigger silently sending a prompt with a hole in it is
-worse than one that reports it.
+Phase 1 §1.1 forbids, and a sandbox-escape surface in a path that builds instructions
+for a tool-holding model. Missing paths render as the empty string and are recorded in
+the trigger's `last_error`, because a trigger silently sending a prompt with a hole in
+it is worse than one that reports it.
 
 **Now the part that matters.** Event `data` is attacker-controlled text — a GitHub issue
 body is written by whoever opened the issue — and it becomes the agent's instructions.
@@ -1809,7 +1812,7 @@ whose depth is `>= EB_TRIGGER_MAX_DEPTH` (default **3**) and records a
 `trigger.dropped` with reason `depth-exceeded`.
 
 `depth` joins `signing.SIGNED_ATTRS`, and it must: an unsigned counter can be reset to
-zero in flight, which turns the whole control off. See §8.2 — this is the second
+zero in flight, which turns the whole control off. See §8.3 — this is the second
 canonicalisation-breaking change in Phase 3 and it has to land together with `userkey`.
 
 **2. Responses are not trigger-eligible by default.** `EB_TRIGGER_ON_RESPONSES=false`.
